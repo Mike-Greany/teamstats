@@ -1,0 +1,8 @@
+# Cloudflare deploy config — tells the unified Workers/Pages runtime that
+# this is a static-assets-only project (no Worker JS), served from /public.
+name = "teamstats"
+compatibility_date = "2026-01-01"
+
+[assets]
+directory = "./public"
+not_found_handling = "single-page-application"
