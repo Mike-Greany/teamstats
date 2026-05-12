@@ -34,8 +34,32 @@ function applyTheme(team) {
     else                        { L.hidden = true; L.removeAttribute('src'); }
   }
   if (R) {
-    if (team?.league_logo_url) { R.src = team.league_logo_url; R.hidden = false; }
-    else                        { R.hidden = true; R.removeAttribute('src'); }
+    if (team?.league_logo_url) {
+      R.src = team.league_logo_url; R.hidden = false;
+      // Wrap (or unwrap) in an anchor based on whether a league_url is set
+      const parentIsLink = R.parentElement && R.parentElement.tagName === 'A';
+      if (team.league_url) {
+        if (parentIsLink) {
+          R.parentElement.href = team.league_url;
+        } else {
+          const a = document.createElement('a');
+          a.href = team.league_url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+          a.className = 'topbar-logo-link';
+          R.parentNode.insertBefore(a, R); a.appendChild(R);
+        }
+      } else if (parentIsLink) {
+        // Strip the wrapping anchor if league_url was cleared
+        const a = R.parentElement;
+        a.parentNode.insertBefore(R, a); a.remove();
+      }
+    } else {
+      R.hidden = true; R.removeAttribute('src');
+      const parentIsLink = R.parentElement && R.parentElement.tagName === 'A';
+      if (parentIsLink) {
+        const a = R.parentElement;
+        a.parentNode.insertBefore(R, a); a.remove();
+      }
+    }
   }
 }
 function setBrand(text) { const b = $('.brand'); if (b) b.textContent = text; }
@@ -188,7 +212,7 @@ async function fetchMyTeams(userId) {
 async function loadTeamBySlug(slug) {
   const { data, error } = await supabase
     .from('teams')
-    .select('id, slug, name, primary_color, accent_color, season, logo_url, league_logo_url, is_public, hidden_stat_cols')
+    .select('id, slug, name, primary_color, accent_color, season, logo_url, league_logo_url, league_url, is_public, hidden_stat_cols')
     .eq('slug', slug)
     .single();
   if (error) return null;
@@ -1717,6 +1741,10 @@ async function renderSettings(team, role) {
         </div>
         <div id="league-status" class="muted small"></div>
 
+        <label for="s-league-url">League logo link (optional)</label>
+        <input id="s-league-url" type="url" maxlength="500" value="${v(team.league_url)}" placeholder="https://www.westfieldlittleleague.com/...">
+        <p class="muted small">When set, tapping the league logo opens this URL in a new tab.</p>
+
         <button type="submit" class="primary">Save settings</button>
         <a href="#/t/${slugSafe}" class="secondary">Cancel</a>
         <div id="settings-status" class="muted small"></div>
@@ -1731,6 +1759,7 @@ async function renderSettings(team, role) {
       primary_color: $('#s-pcolor').value,
       accent_color:  $('#s-acolor').value,
       is_public:     $('#s-public').checked,
+      league_url:    $('#s-league-url').value.trim() || null,
     };
     const btn = e.target.querySelector('button.primary');
     btn.disabled = true; btn.textContent = 'Saving…';
