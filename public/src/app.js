@@ -95,30 +95,33 @@ function fmtAvg(x) {
 }
 
 /* ================= IMAGE HELPERS ================= */
-/** Downscale a phone photo to max 800px on the long side, JPEG ~85%. */
+/** Downscale a phone photo. Keeps PNG (preserving transparency) when source is PNG;
+ *  otherwise outputs JPEG at the given quality. */
 async function resizeImageToBlob(file, maxDim = 800, quality = 0.85) {
   const bitmap = await createImageBitmap(file);
   const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
   const w = Math.round(bitmap.width * scale);
   const h = Math.round(bitmap.height * scale);
-  // Use OffscreenCanvas where available, falling back to a regular canvas.
   let canvas;
-  if (typeof OffscreenCanvas !== 'undefined') {
-    canvas = new OffscreenCanvas(w, h);
-  } else {
-    canvas = document.createElement('canvas');
-    canvas.width = w; canvas.height = h;
-  }
+  if (typeof OffscreenCanvas !== 'undefined') canvas = new OffscreenCanvas(w, h);
+  else { canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h; }
   const ctx = canvas.getContext('2d');
   ctx.drawImage(bitmap, 0, 0, w, h);
-  if (canvas.convertToBlob) return await canvas.convertToBlob({ type: 'image/jpeg', quality });
-  return await new Promise((res) => canvas.toBlob(res, 'image/jpeg', quality));
+  const isPng = file.type === 'image/png';
+  const type = isPng ? 'image/png' : 'image/jpeg';
+  if (canvas.convertToBlob) {
+    return await canvas.convertToBlob(isPng ? { type } : { type, quality });
+  }
+  return await new Promise((res) =>
+    isPng ? canvas.toBlob(res, type) : canvas.toBlob(res, type, quality)
+  );
 }
-/** Upload an arbitrary image to the `logos` bucket at a given path; return public URL. */
+/** Upload an arbitrary image to the `logos` bucket at a given path; return public URL.
+ *  Content-type follows the uploaded blob (PNG stays PNG, others become JPEG). */
 async function uploadImageToLogos(path, file, opts = {}) {
   const blob = await resizeImageToBlob(file, opts.maxDim || 800, opts.quality || 0.85);
   const up = await supabase.storage.from('logos').upload(path, blob, {
-    contentType: 'image/jpeg', upsert: true,
+    contentType: blob.type, upsert: true,
   });
   if (up.error) throw up.error;
   const { data: pub } = supabase.storage.from('logos').getPublicUrl(path);
