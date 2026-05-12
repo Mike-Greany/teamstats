@@ -62,10 +62,12 @@ function fmtAvg(x) {
 const ALIASES = {
   'BB':'BB','HBP':'HBP','R':'R','RBI':'RBI','SB':'SB','S':'SB',
   '1B':'1B','2B':'2B','3B':'3B','HR':'HR',
-  'RUN':'R','RUNS':'R','WALK':'BB','WALKS':'BB'
+  'RUN':'R','RUNS':'R','WALK':'BB','WALKS':'BB',
+  'K':'K','KS':'K',                    // swinging strikeout
+  'KL':'K_LOOKING','KC':'K_LOOKING',   // called / looking strikeout (backwards-K)
 };
 function parseNote(text) {
-  const empty = {AB:0,H:0,'1B':0,'2B':0,'3B':0,HR:0,BB:0,HBP:0,R:0,RBI:0,SB:0};
+  const empty = {AB:0,H:0,'1B':0,'2B':0,'3B':0,HR:0,BB:0,HBP:0,R:0,RBI:0,SB:0,K:0,K_LOOKING:0};
   if (!text) return { stats: empty, played: false };
   let norm = String(text).replace(/(\d+)(1B|2B|3B|HR)\b/g, '$1 $2');
   const s = Object.assign({}, empty);
@@ -89,6 +91,13 @@ function parseNote(text) {
   });
   const typed = s['1B'] + s['2B'] + s['3B'] + s.HR;
   if (typed < s.H) s['1B'] += s.H - typed;
+  // Strikeouts are at-bats but most coaches won't separately list "0-1, K".
+  // If user typed "K" or "KL" without an explicit X-Y, count those toward AB.
+  const Ks = s.K + s.K_LOOKING;
+  const accountedAB = s.AB;
+  if (Ks > 0 && accountedAB < (s.H + Ks)) {
+    s.AB = s.H + Ks;   // bring AB up to at least cover hits + strikeouts
+  }
   return { stats: s, played: true };
 }
 function toast(msg, isError) {
@@ -129,7 +138,7 @@ async function fetchMyTeams(userId) {
 async function loadTeamBySlug(slug) {
   const { data, error } = await supabase
     .from('teams')
-    .select('id, slug, name, primary_color, accent_color, season, logo_url, league_logo_url, is_public')
+    .select('id, slug, name, primary_color, accent_color, season, logo_url, league_logo_url, is_public, hidden_stat_cols')
     .eq('slug', slug)
     .single();
   if (error) return null;
@@ -218,6 +227,7 @@ async function renderTeamRoute(args, session) {
   if (sub === 'game'   && id === 'new') { showTeamNav(team, role, 'schedule'); return renderGameForm(team, role, null); }
   if (sub === 'game'   && id)           { showTeamNav(team, role, 'schedule'); return renderGameForm(team, role, id); }
   if (sub === 'games' && id === 'import'){ showTeamNav(team, role, 'schedule'); return renderGameImport(team, role); }
+  if (sub === 'columns')                  { showTeamNav(team, role, 'team');     return renderColumnSettings(team, role); }
 
   renderNotFound();
 }
@@ -350,23 +360,58 @@ async function renderTeamPicker(session) {
   $('#signout-btn').addEventListener('click', async () => { await supabase.auth.signOut(); });
 }
 
+/* ================= COLUMN VISIBILITY ================= */
+// All possible stat columns, in display order. `key` matches the player object
+// keys built in renderTeamBatting; `dbKey` is the column name used in
+// teams.hidden_stat_cols (Supabase column name conventions = lowercase).
+const STAT_COLS = [
+  { key: 'G',         dbKey: 'g',          label: 'G'   },
+  { key: 'AB',        dbKey: 'ab',         label: 'AB'  },
+  { key: 'R',         dbKey: 'r',          label: 'R'   },
+  { key: 'H',         dbKey: 'h',          label: 'H'   },
+  { key: '1B',        dbKey: 'b1',         label: '1B'  },
+  { key: '2B',        dbKey: 'b2',         label: '2B'  },
+  { key: 'HR',        dbKey: 'hr',         label: 'HR'  },
+  { key: 'BB',        dbKey: 'bb',         label: 'BB'  },
+  { key: 'HBP',       dbKey: 'hbp',        label: 'HBP' },
+  { key: 'RBI',       dbKey: 'rbi',        label: 'RBI' },
+  { key: 'SB',        dbKey: 'sb',         label: 'SB'  },
+  { key: 'K',         dbKey: 'k',          label: 'K',  isAdvanced: true },
+  { key: 'K_LOOKING', dbKey: 'k_looking',  label: 'ꓘ',  isAdvanced: true },
+  { key: 'AVG',       dbKey: 'avg',        label: 'AVG' },
+  { key: 'OBP',       dbKey: 'obp',        label: 'OBP' },
+];
+const PARENT_SHOWALL_LSKEY = (slug) => `teamstats:showall:${slug}`;
+function parentShowsAll(slug) {
+  try { return localStorage.getItem(PARENT_SHOWALL_LSKEY(slug)) === '1'; } catch { return false; }
+}
+function setParentShowsAll(slug, on) {
+  try { localStorage.setItem(PARENT_SHOWALL_LSKEY(slug), on ? '1' : '0'); } catch {}
+}
+function visibleCols(team, role) {
+  const hidden = new Set(team.hidden_stat_cols || []);
+  if (isWriter(role)) return STAT_COLS;                 // coach always sees everything
+  if (parentShowsAll(team.slug)) return STAT_COLS;       // parent opted in
+  return STAT_COLS.filter(c => !hidden.has(c.dbKey));
+}
+
 /* ================= VIEW: TEAM BATTING (default tab) ================= */
 async function renderTeamBatting(team, role, session) {
-  // Pull players + game_log joined, aggregate client-side
   const [{ data: players }, { data: logs }] = await Promise.all([
     supabase.from('players').select('id, first_name, last_name, jersey').eq('team_id', team.id),
-    supabase.from('game_log').select('player_id, ab, r, h, b1, b2, b3, hr, bb, hbp, rbi, sb, game_id').eq('team_id', team.id),
+    supabase.from('game_log').select('player_id, ab, r, h, b1, b2, b3, hr, bb, hbp, rbi, sb, k, k_looking, game_id').eq('team_id', team.id),
   ]);
   const playerMap = {};
   (players || []).forEach(p => {
     playerMap[p.id] = { id: p.id, first: p.first_name, last: p.last_name || '', jersey: p.jersey,
-      G:0, AB:0, R:0, H:0, '1B':0, '2B':0, '3B':0, HR:0, BB:0, HBP:0, RBI:0, SB:0 };
+      G:0, AB:0, R:0, H:0, '1B':0, '2B':0, '3B':0, HR:0, BB:0, HBP:0, RBI:0, SB:0, K:0, K_LOOKING:0 };
   });
   (logs || []).forEach(r => {
     const p = playerMap[r.player_id]; if (!p) return;
     p.G++; p.AB += r.ab||0; p.R += r.r||0; p.H += r.h||0;
     p['1B'] += r.b1||0; p['2B'] += r.b2||0; p['3B'] += r.b3||0; p.HR += r.hr||0;
     p.BB += r.bb||0; p.HBP += r.hbp||0; p.RBI += r.rbi||0; p.SB += r.sb||0;
+    p.K  += r.k||0;  p.K_LOOKING += r.k_looking||0;
   });
   const lines = Object.values(playerMap).map(p => {
     p.AVG = p.AB > 0 ? p.H / p.AB : 0;
@@ -376,42 +421,99 @@ async function renderTeamBatting(team, role, session) {
   }).sort((a,b) => (b.AVG - a.AVG) || (b.H - a.H) || (b.AB - a.AB));
 
   const team_ = { G: new Set((logs||[]).map(r => r.game_id)).size,
-    AB:0,R:0,H:0,'1B':0,'2B':0,'3B':0,HR:0,BB:0,HBP:0,RBI:0,SB:0 };
+    AB:0,R:0,H:0,'1B':0,'2B':0,'3B':0,HR:0,BB:0,HBP:0,RBI:0,SB:0,K:0,K_LOOKING:0 };
   (logs||[]).forEach(r => {
     team_.AB+=r.ab||0; team_.R+=r.r||0; team_.H+=r.h||0;
     team_['1B']+=r.b1||0; team_['2B']+=r.b2||0; team_['3B']+=r.b3||0; team_.HR+=r.hr||0;
     team_.BB+=r.bb||0; team_.HBP+=r.hbp||0; team_.RBI+=r.rbi||0; team_.SB+=r.sb||0;
+    team_.K +=r.k||0;  team_.K_LOOKING += r.k_looking||0;
   });
   team_.AVG = team_.AB > 0 ? team_.H / team_.AB : 0;
   const d = team_.AB + team_.BB + team_.HBP;
   team_.OBP = d > 0 ? (team_.H + team_.BB + team_.HBP) / d : 0;
 
-  const head = `<tr><th class="name">Player</th><th>G</th><th>AB</th><th>R</th><th>H</th><th>1B</th><th>2B</th><th>HR</th><th>BB</th><th>HBP</th><th>RBI</th><th>SB</th><th>AVG</th><th>OBP</th></tr>`;
-  const body = lines.map(p => `
-    <tr>
-      <td class="name">${escapeHtml(p.first)} ${escapeHtml(p.last)}</td>
-      <td>${p.G}</td><td>${p.AB}</td><td>${p.R}</td><td>${p.H}</td>
-      <td>${p['1B']}</td><td>${p['2B']}</td><td>${p.HR}</td>
-      <td>${p.BB}</td><td>${p.HBP}</td><td>${p.RBI}</td><td>${p.SB}</td>
-      <td>${fmtAvg(p.AVG)}</td><td>${fmtAvg(p.OBP)}</td>
-    </tr>`).join('');
-  const totals = `
-    <tr class="totals">
-      <td class="name">Team Totals</td>
-      <td>${team_.G}</td><td>${team_.AB}</td><td>${team_.R}</td><td>${team_.H}</td>
-      <td>${team_['1B']}</td><td>${team_['2B']}</td><td>${team_.HR}</td>
-      <td>${team_.BB}</td><td>${team_.HBP}</td><td>${team_.RBI}</td><td>${team_.SB}</td>
-      <td>${fmtAvg(team_.AVG)}</td><td>${fmtAvg(team_.OBP)}</td>
-    </tr>`;
+  const cols = visibleCols(team, role);
+  const head = `<tr><th class="name">Player</th>${cols.map(c => `<th>${c.label}</th>`).join('')}</tr>`;
+  const cellFor = (p, col) =>
+    (col.dbKey === 'avg' || col.dbKey === 'obp')
+      ? fmtAvg(p[col.key])
+      : (p[col.key] != null ? p[col.key] : 0);
+  const body = lines.map(p =>
+    `<tr><td class="name">${escapeHtml(p.first)} ${escapeHtml(p.last)}</td>` +
+    cols.map(c => `<td>${cellFor(p, c)}</td>`).join('') +
+    `</tr>`).join('');
+  const totals =
+    `<tr class="totals"><td class="name">Team Totals</td>` +
+    cols.map(c => `<td>${cellFor(team_, c)}</td>`).join('') +
+    `</tr>`;
+
+  // Build the small "show all / hide" controls under the table
+  const hidden = (team.hidden_stat_cols || []);
+  const writer = isWriter(role);
+  let controlsHtml = '';
+  if (writer) {
+    controlsHtml = `<a href="#/t/${encodeURIComponent(team.slug)}/columns" class="secondary block">⚙ Manage column visibility</a>`;
+  } else if (hidden.length) {
+    const showing = parentShowsAll(team.slug);
+    controlsHtml = `<button id="toggle-showall" class="secondary block">${showing ? 'Hide advanced stats' : 'Show advanced stats'}</button>`;
+  }
+
   const empty = !lines.length ? `<p class="muted small">No roster yet. Tap Players to add some.</p>` : '';
 
   $('#app').innerHTML = `
     <div class="section-title">Standard Batting</div>
     ${empty}
     ${lines.length ? `<div class="table-wrap"><table class="stats"><thead>${head}</thead><tbody>${body}${totals}</tbody></table></div>` : ''}
+    ${controlsHtml ? `<div class="card">${controlsHtml}</div>` : ''}
     ${session ? `<div class="card"><button id="signout-btn" class="secondary">Sign out</button></div>` : ''}`;
+  const tog = $('#toggle-showall');
+  if (tog) tog.addEventListener('click', () => {
+    setParentShowsAll(team.slug, !parentShowsAll(team.slug));
+    renderTeamBatting(team, role, session);
+  });
   const so = $('#signout-btn');
   if (so) so.addEventListener('click', async () => { await supabase.auth.signOut(); });
+}
+
+/* ================= VIEW: COLUMN VISIBILITY (coach-only) ================= */
+async function renderColumnSettings(team, role) {
+  if (!isWriter(role)) {
+    $('#app').innerHTML = `<div class="card error">Coaches only.</div>`;
+    return;
+  }
+  const hidden = new Set(team.hidden_stat_cols || []);
+  $('#app').innerHTML = `
+    <div class="card">
+      <h1>Column visibility</h1>
+      <p class="muted small">Uncheck a column to hide it from the parent view by default. Parents can still tap "Show advanced stats" to see them.</p>
+      <form id="cols-form" class="auth-form">
+        ${STAT_COLS.map(c => `
+          <label class="check-row">
+            <input type="checkbox" data-col="${c.dbKey}" ${hidden.has(c.dbKey) ? '' : 'checked'}>
+            <span>${escapeHtml(c.label)}${c.isAdvanced ? ' <span class="muted small">(advanced)</span>' : ''}</span>
+          </label>`).join('')}
+        <button type="submit" class="primary">Save</button>
+        <a href="#/t/${encodeURIComponent(team.slug)}" class="secondary">Cancel</a>
+        <div id="cv-status" class="muted small"></div>
+      </form>
+    </div>`;
+  $('#cols-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const newHidden = Array.from(document.querySelectorAll('input[data-col]'))
+      .filter(i => !i.checked).map(i => i.dataset.col);
+    const btn = e.target.querySelector('button.primary');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const { error } = await supabase.from('teams').update({ hidden_stat_cols: newHidden }).eq('id', team.id);
+      if (error) throw error;
+      toast('Visibility saved');
+      location.hash = '#/t/' + encodeURIComponent(team.slug);
+    } catch (err) {
+      $('#cv-status').textContent = err.message || String(err);
+      $('#cv-status').classList.add('error');
+      btn.disabled = false; btn.textContent = 'Save';
+    }
+  });
 }
 
 /* ================= VIEW: SCHEDULE TAB ================= */
@@ -491,6 +593,8 @@ async function renderTeamLog(team, role, session) {
     return na.localeCompare(nb);
   });
   const empty = !sorted.length ? `<p class="muted small">No stat entries yet${writer ? ' — tap + Add to enter your first game.' : '.'}</p>` : '';
+  const cols = visibleCols(team, role);
+  const showCol = (dbKey) => cols.some(c => c.dbKey === dbKey);
   const cards = sorted.map(r => {
     const p = pMap[r.player_id]; const g = gMap[r.game_id];
     if (!p || !g) return '';
@@ -502,6 +606,8 @@ async function renderTeamLog(team, role, session) {
       r.r ? `R ${r.r}` : null,
       r.rbi ? `RBI ${r.rbi}` : null,
       r.sb ? `SB ${r.sb}` : null,
+      (r.k && showCol('k')) ? `K ${r.k}` : null,
+      (r.k_looking && showCol('k_looking')) ? `ꓘ ${r.k_looking}` : null,
     ].filter(Boolean).join(' · ') || '—';
     return `
       <div class="log-card">
@@ -545,10 +651,16 @@ async function renderEntryForm(team, role, entryId) {
   const initStats = existing
     ? { AB: existing.ab||0, R: existing.r||0, H: existing.h||0,
         '1B': existing.b1||0, '2B': existing.b2||0, HR: existing.hr||0,
-        BB: existing.bb||0, HBP: existing.hbp||0, RBI: existing.rbi||0, SB: existing.sb||0 }
-    : { AB:0,R:0,H:0,'1B':0,'2B':0,HR:0,BB:0,HBP:0,RBI:0,SB:0 };
-  const FIELD_MAP = [['ab','AB'],['r','R'],['h','H'],['b1','1B'],['b2','2B'],
-                     ['hr','HR'],['bb','BB'],['hbp','HBP'],['rbi','RBI'],['sb','SB']];
+        BB: existing.bb||0, HBP: existing.hbp||0, RBI: existing.rbi||0, SB: existing.sb||0,
+        K: existing.k||0, K_LOOKING: existing.k_looking||0 }
+    : { AB:0,R:0,H:0,'1B':0,'2B':0,HR:0,BB:0,HBP:0,RBI:0,SB:0,K:0,K_LOOKING:0 };
+  // [dbKey, parseNoteStatsKey, displayLabel]
+  const FIELD_MAP = [
+    ['ab','AB','AB'], ['r','R','R'], ['h','H','H'],
+    ['b1','1B','1B'], ['b2','2B','2B'], ['hr','HR','HR'],
+    ['bb','BB','BB'], ['hbp','HBP','HBP'], ['rbi','RBI','RBI'], ['sb','SB','SB'],
+    ['k','K','K'], ['k_looking','K_LOOKING','ꓘ']
+  ];
 
   $('#app').innerHTML = `
     <div class="card">
@@ -564,9 +676,9 @@ async function renderEntryForm(team, role, entryId) {
         <p class="muted small">Type shorthand above and the boxes below auto-fill. You can also edit any box directly.</p>
 
         <div class="manual-grid">
-          ${FIELD_MAP.map(([k,l]) =>
+          ${FIELD_MAP.map(([k, sk, l]) =>
             `<div><label>${l}</label>
-               <input type="number" min="0" value="${initStats[l]}" data-mk="${k}"></div>`).join('')}
+               <input type="number" min="0" value="${initStats[sk]}" data-mk="${k}"></div>`).join('')}
         </div>
 
         <button type="submit" class="primary">${existing ? 'Save changes' : 'Save row'}</button>
@@ -579,9 +691,9 @@ async function renderEntryForm(team, role, entryId) {
   const noteEl = $('#ef-note');
   const fillFromNote = () => {
     const { stats } = parseNote(noteEl.value);
-    FIELD_MAP.forEach(([k, label]) => {
+    FIELD_MAP.forEach(([k, sk]) => {
       const inp = document.querySelector(`input[data-mk="${k}"]`);
-      if (inp) inp.value = stats[label] || 0;
+      if (inp) inp.value = stats[sk] || 0;
     });
   };
   noteEl.addEventListener('input', fillFromNote);
@@ -595,6 +707,7 @@ async function renderEntryForm(team, role, entryId) {
     const row = { team_id: team.id, game_id: gameId, player_id: playerId,
       ab: m.ab, r: m.r, h: m.h, b1: m.b1, b2: m.b2, b3: 0, hr: m.hr,
       bb: m.bb, hbp: m.hbp, rbi: m.rbi, sb: m.sb,
+      k: m.k || 0, k_looking: m.k_looking || 0,
       notes: noteEl.value || null };
     if (row.h > row.ab) {
       $('#ef-status').textContent = 'H cannot exceed AB.';

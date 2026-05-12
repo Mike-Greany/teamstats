@@ -135,6 +135,15 @@ a.secondary.block { display: block; width: 100%; text-align: center; }
 .preview-list { max-height: 240px; overflow-y: auto; border: 1px dashed var(--row-border);
   border-radius: 6px; padding: 4px 8px; margin-top: 6px; background: #fff; }
 
+/* Coach column-visibility check list */
+.check-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 4px; border-bottom: 1px solid var(--row-border);
+  cursor: pointer;
+}
+.check-row input[type="checkbox"] { width: 18px; height: 18px; }
+.check-row span { flex: 1; font-size: 14px; }
+
 /* Roster / Schedule list rows */
 .row-list { list-style: none; padding: 0; margin: 0; }
 .row-item {
