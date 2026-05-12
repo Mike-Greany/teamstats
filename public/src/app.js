@@ -58,6 +58,42 @@ function fmtAvg(x) {
   return x.toFixed(3).replace(/^0\./, '.');
 }
 
+/* ================= IMAGE HELPERS ================= */
+/** Downscale a phone photo to max 800px on the long side, JPEG ~85%. */
+async function resizeImageToBlob(file, maxDim = 800, quality = 0.85) {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
+  const w = Math.round(bitmap.width * scale);
+  const h = Math.round(bitmap.height * scale);
+  // Use OffscreenCanvas where available, falling back to a regular canvas.
+  let canvas;
+  if (typeof OffscreenCanvas !== 'undefined') {
+    canvas = new OffscreenCanvas(w, h);
+  } else {
+    canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(bitmap, 0, 0, w, h);
+  if (canvas.convertToBlob) return await canvas.convertToBlob({ type: 'image/jpeg', quality });
+  return await new Promise((res) => canvas.toBlob(res, 'image/jpeg', quality));
+}
+/** Upload a player headshot to the `logos` bucket and update players.photo_url. */
+async function uploadPlayerPhoto(team, playerId, file) {
+  const blob = await resizeImageToBlob(file);
+  const path = `players/${team.id}/${playerId}.jpg`;
+  const up = await supabase.storage.from('logos').upload(path, blob, {
+    contentType: 'image/jpeg', upsert: true,
+  });
+  if (up.error) throw up.error;
+  const { data: pub } = supabase.storage.from('logos').getPublicUrl(path);
+  // Cache-bust so the new image overrides any cached copy on the same URL
+  const photoUrl = pub.publicUrl + '?v=' + Date.now();
+  const upd = await supabase.from('players').update({ photo_url: photoUrl }).eq('id', playerId);
+  if (upd.error) throw upd.error;
+  return photoUrl;
+}
+
 /* ================= BR-SHORTHAND PARSER (port from Apps Script) ================= */
 const ALIASES = {
   'BB':'BB','HBP':'HBP','R':'R','RBI':'RBI','SB':'SB','S':'SB',
@@ -551,11 +587,14 @@ async function renderTeamSchedule(team, role, session) {
 async function renderTeamPlayers(team, role, session) {
   const writer = isWriter(role);
   const { data: players } = await supabase
-    .from('players').select('id, first_name, last_name, jersey, position, display_order')
+    .from('players').select('id, first_name, last_name, jersey, position, display_order, photo_url')
     .eq('team_id', team.id).order('display_order', { ascending: true }).order('jersey', { ascending: true });
   const slugSafe = encodeURIComponent(team.slug);
   const rows = (players || []).map(p => `
     <li class="row-item">
+      ${p.photo_url
+        ? `<img class="row-avatar" src="${escapeHtml(p.photo_url)}" alt="">`
+        : '<span class="row-avatar placeholder"></span>'}
       ${p.jersey ? `<span class="jersey">#${escapeHtml(p.jersey)}</span>` : '<span class="jersey muted">—</span>'}
       <a href="#/t/${slugSafe}/player/${encodeURIComponent(p.id)}" class="row-main row-link">${escapeHtml(p.first_name)} ${escapeHtml(p.last_name || '')}</a>
       ${p.position ? `<span class="row-meta muted">${escapeHtml(p.position)}</span>` : ''}
@@ -729,7 +768,12 @@ async function renderPlayerProfile(team, role, playerId, session) {
   // Title bar: full name centered with optional jersey badge
   setBrand(`${player.first_name} ${player.last_name || ''}${player.jersey ? '  #' + player.jersey : ''}`);
 
+  const heroPhoto = player.photo_url
+    ? `<div class="player-hero"><img class="player-photo" src="${escapeHtml(player.photo_url)}" alt="${escapeHtml(player.first_name)}"></div>`
+    : '';
+
   $('#app').innerHTML = `
+    ${heroPhoto}
     <div class="summary-chips">
       <span class="chip">G ${season.G}</span>
       <span class="chip">AB ${season.AB}</span>
@@ -766,6 +810,18 @@ async function renderProfileInfoEdit(team, role, playerId) {
     <div class="card">
       <h1>Edit info for ${escapeHtml(player.first_name)} ${escapeHtml(player.last_name || '')}</h1>
       <form id="info-form" class="auth-form">
+        <label>Photo (optional)</label>
+        <div class="photo-row">
+          ${player.photo_url
+            ? `<img id="photo-preview" class="player-photo small" src="${escapeHtml(player.photo_url)}" alt="">`
+            : `<div id="photo-preview" class="player-photo small placeholder">📷</div>`}
+          <div class="photo-actions">
+            <input id="if-photo" type="file" accept="image/*" capture="environment">
+            ${player.photo_url ? '<button type="button" id="if-photo-clear" class="secondary small">Remove</button>' : ''}
+          </div>
+        </div>
+        <div id="photo-status" class="muted small"></div>
+
         <div class="row">
           <div><label for="if-bats">Bats</label>
             <select id="if-bats">
@@ -821,6 +877,46 @@ async function renderProfileInfoEdit(team, role, playerId) {
       $('#if-status').textContent = err.message || String(err);
       $('#if-status').classList.add('error');
       btn.disabled = false; btn.textContent = 'Save info';
+    }
+  });
+
+  // Photo upload: fires immediately on file pick.
+  const photoInput = $('#if-photo');
+  const photoStatus = $('#photo-status');
+  photoInput.addEventListener('change', async () => {
+    const f = photoInput.files[0]; if (!f) return;
+    photoStatus.textContent = 'Uploading…'; photoStatus.classList.remove('error');
+    try {
+      const url = await uploadPlayerPhoto(team, playerId, f);
+      const preview = $('#photo-preview');
+      if (preview.tagName === 'IMG') {
+        preview.src = url;
+      } else {
+        preview.outerHTML = `<img id="photo-preview" class="player-photo small" src="${escapeHtml(url)}" alt="">`;
+      }
+      photoStatus.textContent = 'Photo updated. Tap Save info to commit any other changes.';
+    } catch (err) {
+      console.error(err);
+      photoStatus.textContent = 'Upload failed: ' + (err.message || err);
+      photoStatus.classList.add('error');
+    }
+  });
+  const clearBtn = $('#if-photo-clear');
+  if (clearBtn) clearBtn.addEventListener('click', async () => {
+    if (!confirm('Remove this player\'s photo?')) return;
+    photoStatus.textContent = 'Removing…';
+    try {
+      const path = `players/${team.id}/${playerId}.jpg`;
+      await supabase.storage.from('logos').remove([path]);          // best-effort
+      const { error: upErr } = await supabase.from('players').update({ photo_url: null }).eq('id', playerId);
+      if (upErr) throw upErr;
+      photoStatus.textContent = 'Photo removed.';
+      const preview = $('#photo-preview');
+      preview.outerHTML = '<div id="photo-preview" class="player-photo small placeholder">📷</div>';
+      clearBtn.remove();
+    } catch (err) {
+      photoStatus.textContent = 'Remove failed: ' + (err.message || err);
+      photoStatus.classList.add('error');
     }
   });
 }
