@@ -540,6 +540,16 @@ async function renderEntryForm(team, role, entryId) {
   const playerOpts = (players || []).map(p =>
     `<option value="${p.id}" ${existing && existing.player_id === p.id ? 'selected' : ''}>${escapeHtml(p.first_name)} ${escapeHtml(p.last_name || '')}</option>`).join('');
 
+  // Pre-fill the manual fields from the existing note (if editing) or from
+  // the row's already-saved values. parseNote handles auto-singles, etc.
+  const initStats = existing
+    ? { AB: existing.ab||0, R: existing.r||0, H: existing.h||0,
+        '1B': existing.b1||0, '2B': existing.b2||0, HR: existing.hr||0,
+        BB: existing.bb||0, HBP: existing.hbp||0, RBI: existing.rbi||0, SB: existing.sb||0 }
+    : { AB:0,R:0,H:0,'1B':0,'2B':0,HR:0,BB:0,HBP:0,RBI:0,SB:0 };
+  const FIELD_MAP = [['ab','AB'],['r','R'],['h','H'],['b1','1B'],['b2','2B'],
+                     ['hr','HR'],['bb','BB'],['hbp','HBP'],['rbi','RBI'],['sb','SB']];
+
   $('#app').innerHTML = `
     <div class="card">
       <h1>${existing ? 'Edit stats' : 'Add stats'}</h1>
@@ -549,26 +559,14 @@ async function renderEntryForm(team, role, entryId) {
         <label for="ef-player">Player</label>
         <select id="ef-player" required ${existing ? 'disabled' : ''}>${playerOpts}</select>
 
-        <label>Mode</label>
-        <div class="mode-toggle" role="tablist">
-          <button type="button" class="${initMode === 'quick' ? 'active' : ''}" data-mode="quick">Quick note</button>
-          <button type="button" class="${initMode === 'manual' ? 'active' : ''}" data-mode="manual">Manual fields</button>
-        </div>
+        <label for="ef-note">Add game stats</label>
+        <textarea id="ef-note" rows="3" placeholder="e.g. 1-3, BB, 2SB, R, RBI">${escapeHtml(existing ? (existing.notes || '') : '')}</textarea>
+        <p class="muted small">Type shorthand above and the boxes below auto-fill. You can also edit any box directly.</p>
 
-        <div id="quick-mode" ${initMode === 'manual' ? 'hidden' : ''}>
-          <label for="ef-note">BR shorthand</label>
-          <textarea id="ef-note" rows="3" placeholder="e.g. 1-3, BB, 2SB, R, RBI">${escapeHtml(existing ? (existing.notes || '') : '')}</textarea>
-          <label>Live preview</label>
-          <div class="preview-pills" id="preview"><span class="muted small">—</span></div>
-        </div>
-
-        <div id="manual-mode" ${initMode === 'quick' ? 'hidden' : ''}>
-          <div class="manual-grid">
-            ${[['ab','AB'],['r','R'],['h','H'],['b1','1B'],['b2','2B'],['hr','HR'],['bb','BB'],['hbp','HBP'],['rbi','RBI'],['sb','SB']]
-              .map(([k,l]) => `<div><label>${l}</label><input type="number" min="0" value="${v(k)}" data-mk="${k}"></div>`).join('')}
-          </div>
-          <label for="ef-manual-notes">Notes</label>
-          <input id="ef-manual-notes" type="text" maxlength="300" value="${escapeHtml(existing ? (existing.notes || '') : '')}" placeholder="optional">
+        <div class="manual-grid">
+          ${FIELD_MAP.map(([k,l]) =>
+            `<div><label>${l}</label>
+               <input type="number" min="0" value="${initStats[l]}" data-mk="${k}"></div>`).join('')}
         </div>
 
         <button type="submit" class="primary">${existing ? 'Save changes' : 'Save row'}</button>
@@ -578,45 +576,26 @@ async function renderEntryForm(team, role, entryId) {
       </form>
     </div>`;
 
-  let mode = initMode;
   const noteEl = $('#ef-note');
-  const updatePreview = () => {
+  const fillFromNote = () => {
     const { stats } = parseNote(noteEl.value);
-    const pills = ['AB','R','H','1B','2B','HR','BB','HBP','RBI','SB']
-      .filter(k => stats[k]).map(k => `<span class="pill">${k} ${stats[k]}</span>`).join('');
-    $('#preview').innerHTML = pills || '<span class="muted small">—</span>';
+    FIELD_MAP.forEach(([k, label]) => {
+      const inp = document.querySelector(`input[data-mk="${k}"]`);
+      if (inp) inp.value = stats[label] || 0;
+    });
   };
-  noteEl.addEventListener('input', updatePreview);
-  if (mode === 'quick') updatePreview();
-
-  $$('.mode-toggle button').forEach(b => b.addEventListener('click', () => {
-    mode = b.dataset.mode;
-    $$('.mode-toggle button').forEach(x => x.classList.toggle('active', x === b));
-    $('#quick-mode').hidden = mode !== 'quick';
-    $('#manual-mode').hidden = mode !== 'manual';
-  }));
+  noteEl.addEventListener('input', fillFromNote);
 
   $('#entry-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const gameId = (existing ? existing.game_id : $('#ef-game').value);
     const playerId = (existing ? existing.player_id : $('#ef-player').value);
-    let row;
-    if (mode === 'quick') {
-      const note = noteEl.value;
-      const { stats } = parseNote(note);
-      row = { team_id: team.id, game_id: gameId, player_id: playerId,
-        ab: stats.AB, r: stats.R, h: stats.H,
-        b1: stats['1B'], b2: stats['2B'], b3: stats['3B'], hr: stats.HR,
-        bb: stats.BB, hbp: stats.HBP, rbi: stats.RBI, sb: stats.SB,
-        notes: note };
-    } else {
-      const m = {};
-      $$('input[data-mk]').forEach(i => m[i.dataset.mk] = parseInt(i.value, 10) || 0);
-      row = { team_id: team.id, game_id: gameId, player_id: playerId,
-        ab: m.ab, r: m.r, h: m.h, b1: m.b1, b2: m.b2, b3: 0, hr: m.hr,
-        bb: m.bb, hbp: m.hbp, rbi: m.rbi, sb: m.sb,
-        notes: $('#ef-manual-notes').value || null };
-    }
+    const m = {};
+    $$('input[data-mk]').forEach(i => m[i.dataset.mk] = parseInt(i.value, 10) || 0);
+    const row = { team_id: team.id, game_id: gameId, player_id: playerId,
+      ab: m.ab, r: m.r, h: m.h, b1: m.b1, b2: m.b2, b3: 0, hr: m.hr,
+      bb: m.bb, hbp: m.hbp, rbi: m.rbi, sb: m.sb,
+      notes: noteEl.value || null };
     if (row.h > row.ab) {
       $('#ef-status').textContent = 'H cannot exceed AB.';
       $('#ef-status').classList.add('error');
