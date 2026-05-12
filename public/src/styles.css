@@ -27,11 +27,35 @@ body.no-nav { padding-bottom: 0; }
   box-shadow: 0 1px 4px rgba(0,0,0,0.15);
 }
 .topbar-inner {
-  display: flex; align-items: center; gap: 10px;
-  padding: 14px 16px; padding-top: max(14px, env(safe-area-inset-top));
-  font-size: 18px; font-weight: 700; letter-spacing: 0.3px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px; padding-top: max(10px, env(safe-area-inset-top));
 }
-.brand { color: #fff; }
+.brand {
+  color: #fff; text-align: center; min-width: 0;
+  font-size: 18px; font-weight: 700; letter-spacing: 0.3px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.topbar-logo {
+  height: 36px; width: auto; display: block; max-width: 90px;
+  object-fit: contain;
+}
+.topbar-logo[hidden] { display: none; }
+.topbar-logo.preview {
+  height: 56px; max-width: 130px;
+  border: 1px solid var(--row-border); border-radius: 6px;
+  background: #fff;
+}
+.topbar-logo.preview.placeholder {
+  display: flex; align-items: center; justify-content: center;
+  background: var(--row-alt); font-size: 22px; color: var(--muted); width: 56px;
+}
+
+hr.muted-divider {
+  border: 0; border-top: 1px solid var(--row-border); margin: 14px 0 4px 0;
+}
 .gold-stripe { height: 2px; background: var(--gold); }
 
 /* App container */

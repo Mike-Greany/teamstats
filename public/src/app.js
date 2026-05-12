@@ -26,6 +26,17 @@ function applyTheme(team) {
   const root = document.documentElement;
   root.style.setProperty('--navy', team?.primary_color || '#1f3864');
   root.style.setProperty('--gold', team?.accent_color  || '#c9a227');
+  // Logo slots in the top bar
+  const L = document.getElementById('topbar-logo-left');
+  const R = document.getElementById('topbar-logo-right');
+  if (L) {
+    if (team?.logo_url)        { L.src = team.logo_url; L.hidden = false; }
+    else                        { L.hidden = true; L.removeAttribute('src'); }
+  }
+  if (R) {
+    if (team?.league_logo_url) { R.src = team.league_logo_url; R.hidden = false; }
+    else                        { R.hidden = true; R.removeAttribute('src'); }
+  }
 }
 function setBrand(text) { const b = $('.brand'); if (b) b.textContent = text; }
 function showTeamNav(team, role, activeTab) {
@@ -79,20 +90,22 @@ async function resizeImageToBlob(file, maxDim = 800, quality = 0.85) {
   if (canvas.convertToBlob) return await canvas.convertToBlob({ type: 'image/jpeg', quality });
   return await new Promise((res) => canvas.toBlob(res, 'image/jpeg', quality));
 }
-/** Upload a player headshot to the `logos` bucket and update players.photo_url. */
-async function uploadPlayerPhoto(team, playerId, file) {
-  const blob = await resizeImageToBlob(file);
-  const path = `players/${team.id}/${playerId}.jpg`;
+/** Upload an arbitrary image to the `logos` bucket at a given path; return public URL. */
+async function uploadImageToLogos(path, file, opts = {}) {
+  const blob = await resizeImageToBlob(file, opts.maxDim || 800, opts.quality || 0.85);
   const up = await supabase.storage.from('logos').upload(path, blob, {
     contentType: 'image/jpeg', upsert: true,
   });
   if (up.error) throw up.error;
   const { data: pub } = supabase.storage.from('logos').getPublicUrl(path);
-  // Cache-bust so the new image overrides any cached copy on the same URL
-  const photoUrl = pub.publicUrl + '?v=' + Date.now();
-  const upd = await supabase.from('players').update({ photo_url: photoUrl }).eq('id', playerId);
+  return pub.publicUrl + '?v=' + Date.now();
+}
+/** Upload a player headshot and update players.photo_url. */
+async function uploadPlayerPhoto(team, playerId, file) {
+  const url = await uploadImageToLogos(`players/${team.id}/${playerId}.jpg`, file);
+  const upd = await supabase.from('players').update({ photo_url: url }).eq('id', playerId);
   if (upd.error) throw upd.error;
-  return photoUrl;
+  return url;
 }
 
 /* ================= BR-SHORTHAND PARSER (port from Apps Script) ================= */
@@ -270,6 +283,7 @@ async function renderTeamRoute(args, session) {
   if (sub === 'columns')                  { showTeamNav(team, role, 'team');     return renderColumnSettings(team, role); }
   if (sub === 'lineup' && !id)            { showTeamNav(team, role, 'lineup');   return renderLineupPicker(team, role); }
   if (sub === 'lineup' && id)             { showTeamNav(team, role, 'lineup');   return renderLineupBuilder(team, role, id); }
+  if (sub === 'settings')                 { showTeamNav(team, role, 'team');     return renderSettings(team, role); }
 
   renderNotFound();
 }
@@ -494,7 +508,9 @@ async function renderTeamBatting(team, role, session) {
   const writer = isWriter(role);
   let controlsHtml = '';
   if (writer) {
-    controlsHtml = `<a href="#/t/${encodeURIComponent(team.slug)}/columns" class="secondary block">⚙ Manage column visibility</a>`;
+    controlsHtml = `
+      <a href="#/t/${encodeURIComponent(team.slug)}/settings" class="secondary block">⚙ Team settings (name, colors, logos)</a>
+      <a href="#/t/${encodeURIComponent(team.slug)}/columns" class="secondary block">⚙ Column visibility</a>`;
   } else if (hidden.length) {
     const showing = parentShowsAll(team.slug);
     controlsHtml = `<button id="toggle-showall" class="secondary block">${showing ? 'Hide advanced stats' : 'Show advanced stats'}</button>`;
@@ -1641,6 +1657,140 @@ async function copyLastLineup() {
     for (let k = 0; k < selects.length; k++) selects[k].value = arr[k] || '';
   });
   toast('Copied — Save to commit.');
+}
+
+/* ================= VIEW: TEAM SETTINGS ================= */
+async function renderSettings(team, role) {
+  if (!isWriter(role)) {
+    $('#app').innerHTML = `<div class="card error">Coaches only. <a href="#/t/${encodeURIComponent(team.slug)}">Back</a></div>`;
+    return;
+  }
+  const slugSafe = encodeURIComponent(team.slug);
+  const v = (s) => escapeHtml(s || '');
+
+  $('#app').innerHTML = `
+    <div class="card">
+      <h1>Team settings</h1>
+      <form id="settings-form" class="auth-form">
+        <label for="s-name">Team name</label>
+        <input id="s-name" type="text" required maxlength="80" value="${v(team.name)}">
+
+        <label for="s-season">Season</label>
+        <input id="s-season" type="text" maxlength="40" value="${v(team.season)}" placeholder="e.g. 2026 Spring">
+
+        <div class="color-row">
+          <div><label for="s-pcolor">Primary color</label>
+            <input id="s-pcolor" type="color" value="${v(team.primary_color || '#1f3864')}"></div>
+          <div><label for="s-acolor">Accent color</label>
+            <input id="s-acolor" type="color" value="${v(team.accent_color || '#c9a227')}"></div>
+        </div>
+
+        <label>Public visibility</label>
+        <label class="check-row">
+          <input id="s-public" type="checkbox" ${team.is_public ? 'checked' : ''}>
+          <span>Anyone with the link can view (recommended). Uncheck to require sign-in.</span>
+        </label>
+
+        <hr class="muted-divider">
+
+        <label>Team logo (left side of top bar)</label>
+        <div class="photo-row">
+          ${team.logo_url
+            ? `<img id="team-logo-preview" class="topbar-logo preview" src="${v(team.logo_url)}" alt="">`
+            : `<div id="team-logo-preview" class="topbar-logo preview placeholder">🏟️</div>`}
+          <div class="photo-actions">
+            <input id="s-logo" type="file" accept="image/*">
+            ${team.logo_url ? '<button type="button" id="clear-logo" class="secondary small">Remove</button>' : ''}
+          </div>
+        </div>
+        <div id="logo-status" class="muted small"></div>
+
+        <label>League logo (right side of top bar)</label>
+        <div class="photo-row">
+          ${team.league_logo_url
+            ? `<img id="league-logo-preview" class="topbar-logo preview" src="${v(team.league_logo_url)}" alt="">`
+            : `<div id="league-logo-preview" class="topbar-logo preview placeholder">🏆</div>`}
+          <div class="photo-actions">
+            <input id="s-league" type="file" accept="image/*">
+            ${team.league_logo_url ? '<button type="button" id="clear-league" class="secondary small">Remove</button>' : ''}
+          </div>
+        </div>
+        <div id="league-status" class="muted small"></div>
+
+        <button type="submit" class="primary">Save settings</button>
+        <a href="#/t/${slugSafe}" class="secondary">Cancel</a>
+        <div id="settings-status" class="muted small"></div>
+      </form>
+    </div>`;
+
+  $('#settings-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const payload = {
+      name:          $('#s-name').value.trim(),
+      season:        $('#s-season').value.trim() || null,
+      primary_color: $('#s-pcolor').value,
+      accent_color:  $('#s-acolor').value,
+      is_public:     $('#s-public').checked,
+    };
+    const btn = e.target.querySelector('button.primary');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const { error } = await supabase.from('teams').update(payload).eq('id', team.id);
+      if (error) throw error;
+      toast('Settings saved');
+      location.hash = '#/t/' + slugSafe;
+    } catch (err) {
+      $('#settings-status').textContent = err.message || String(err);
+      $('#settings-status').classList.add('error');
+      btn.disabled = false; btn.textContent = 'Save settings';
+    }
+  });
+
+  const wireLogoUpload = (inputId, statusId, previewId, clearBtnId, kind) => {
+    const colName = kind === 'team' ? 'logo_url' : 'league_logo_url';
+    const pathBase = kind === 'team' ? `team-logos/${team.id}/main.jpg` : `team-logos/${team.id}/league.jpg`;
+    const inp = document.getElementById(inputId);
+    const status = document.getElementById(statusId);
+    const preview = document.getElementById(previewId);
+    inp.addEventListener('change', async () => {
+      const f = inp.files[0]; if (!f) return;
+      status.textContent = 'Uploading…'; status.classList.remove('error');
+      try {
+        const url = await uploadImageToLogos(pathBase, f);
+        const upd = await supabase.from('teams').update({ [colName]: url }).eq('id', team.id);
+        if (upd.error) throw upd.error;
+        if (preview.tagName === 'IMG') preview.src = url;
+        else preview.outerHTML = `<img id="${previewId}" class="topbar-logo preview" src="${url}" alt="">`;
+        status.textContent = 'Saved.';
+        applyTheme({ ...team, [colName]: url });
+      } catch (err) {
+        console.error(err);
+        status.textContent = 'Upload failed: ' + (err.message || err);
+        status.classList.add('error');
+      }
+    });
+    const clearBtn = document.getElementById(clearBtnId);
+    if (clearBtn) clearBtn.addEventListener('click', async () => {
+      if (!confirm('Remove this logo?')) return;
+      try {
+        await supabase.storage.from('logos').remove([pathBase]);
+        const upd = await supabase.from('teams').update({ [colName]: null }).eq('id', team.id);
+        if (upd.error) throw upd.error;
+        const newPreview = document.createElement('div');
+        newPreview.id = previewId; newPreview.className = 'topbar-logo preview placeholder';
+        newPreview.textContent = kind === 'team' ? '🏟️' : '🏆';
+        document.getElementById(previewId).replaceWith(newPreview);
+        clearBtn.remove();
+        status.textContent = 'Removed.';
+        applyTheme({ ...team, [colName]: null });
+      } catch (err) {
+        status.textContent = 'Remove failed: ' + (err.message || err);
+        status.classList.add('error');
+      }
+    });
+  };
+  wireLogoUpload('s-logo',   'logo-status',   'team-logo-preview',   'clear-logo',   'team');
+  wireLogoUpload('s-league', 'league-status', 'league-logo-preview', 'clear-league', 'league');
 }
 
 /* ================= VIEW: NOT FOUND ================= */
