@@ -27,6 +27,70 @@ function applyTheme(team) {
   root.style.setProperty('--navy', team?.primary_color || '#1f3864');
   root.style.setProperty('--gold', team?.accent_color  || '#c9a227');
 }
+function setBrand(text) { const b = $('.brand'); if (b) b.textContent = text; }
+function showTeamNav(team, role, activeTab) {
+  const nav = $('#bottomnav');
+  nav.hidden = false;
+  const slugSafe = encodeURIComponent(team.slug);
+  const map = {
+    team:     `#/t/${slugSafe}`,
+    schedule: `#/t/${slugSafe}/schedule`,
+    players:  `#/t/${slugSafe}/players`,
+    log:      `#/t/${slugSafe}/log`,
+    entry:    `#/t/${slugSafe}/entry/new`,
+  };
+  $$('#bottomnav a').forEach(a => {
+    const tab = a.dataset.tab;
+    a.href = map[tab] || '#/';
+    a.hidden = (tab === 'entry' && !isWriter(role));
+    a.classList.toggle('active', tab === activeTab);
+  });
+  document.body.classList.remove('no-nav');
+}
+function hideTeamNav() {
+  $('#bottomnav').hidden = true;
+  document.body.classList.add('no-nav');
+  setBrand('TeamStats');
+}
+function fmtAvg(x) {
+  if (!isFinite(x) || x == null) return '.000';
+  if (x >= 1) return x.toFixed(3);
+  return x.toFixed(3).replace(/^0\./, '.');
+}
+
+/* ================= BR-SHORTHAND PARSER (port from Apps Script) ================= */
+const ALIASES = {
+  'BB':'BB','HBP':'HBP','R':'R','RBI':'RBI','SB':'SB','S':'SB',
+  '1B':'1B','2B':'2B','3B':'3B','HR':'HR',
+  'RUN':'R','RUNS':'R','WALK':'BB','WALKS':'BB'
+};
+function parseNote(text) {
+  const empty = {AB:0,H:0,'1B':0,'2B':0,'3B':0,HR:0,BB:0,HBP:0,R:0,RBI:0,SB:0};
+  if (!text) return { stats: empty, played: false };
+  let norm = String(text).replace(/(\d+)(1B|2B|3B|HR)\b/g, '$1 $2');
+  const s = Object.assign({}, empty);
+  norm.split(/[,;]/).forEach((raw) => {
+    const tok = raw.trim();
+    if (!tok) return;
+    let m;
+    if ((m = /^(\d+)\s*-\s*(\d+)$/.exec(tok))) {
+      s.H += parseInt(m[1], 10); s.AB += parseInt(m[2], 10); return;
+    }
+    if ((m = /^(\d+)\s+([A-Za-z0-9]+)$/.exec(tok))) {
+      const n = parseInt(m[1], 10), name = m[2].toUpperCase();
+      if (ALIASES[name]) { s[ALIASES[name]] += n; return; }
+    }
+    if ((m = /^(\d+)([A-Za-z][A-Za-z0-9]*)$/.exec(tok))) {
+      const n = parseInt(m[1], 10), name = m[2].toUpperCase();
+      if (ALIASES[name]) { s[ALIASES[name]] += n; return; }
+    }
+    const u = tok.toUpperCase().replace(/\s+/g, '');
+    if (ALIASES[u]) s[ALIASES[u]] += 1;
+  });
+  const typed = s['1B'] + s['2B'] + s['3B'] + s.HR;
+  if (typed < s.H) s['1B'] += s.H - typed;
+  return { stats: s, played: true };
+}
 function toast(msg, isError) {
   let t = $('#toast');
   if (!t) {
@@ -126,27 +190,41 @@ async function renderTeamRoute(args, session) {
   if (!slug) { location.hash = '#/'; return; }
   const team = await loadTeamBySlug(slug);
   if (!team) {
+    hideTeamNav();
     applyTheme(null);
     $('#app').innerHTML = `<div class="card error">Team not found: <code>${escapeHtml(slug)}</code></div>`;
     return;
   }
   applyTheme(team);
+  setBrand(team.name);
   const role = session ? await loadMyRole(team.id, session.user.id) : null;
 
   const sub = args[1];
   const id  = args[2];
-  if (!sub)                       return renderTeamHome(team, role, session);
-  if (sub === 'player' && id === 'new')  return renderPlayerForm(team, role, null);
-  if (sub === 'player' && id)           return renderPlayerForm(team, role, id);
-  if (sub === 'players' && id === 'import') return renderPlayerImport(team, role);
-  if (sub === 'game'   && id === 'new')  return renderGameForm(team, role, null);
-  if (sub === 'game'   && id)           return renderGameForm(team, role, id);
-  if (sub === 'games' && id === 'import') return renderGameImport(team, role);
+
+  // Tabbed views
+  if (!sub)                  { showTeamNav(team, role, 'team');     return renderTeamBatting(team, role, session); }
+  if (sub === 'schedule')    { showTeamNav(team, role, 'schedule'); return renderTeamSchedule(team, role, session); }
+  if (sub === 'players' && !id) { showTeamNav(team, role, 'players'); return renderTeamPlayers(team, role, session); }
+  if (sub === 'log')         { showTeamNav(team, role, 'log');      return renderTeamLog(team, role, session); }
+
+  // Sub-forms (no active tab highlight or keep parent tab)
+  if (sub === 'entry'  && id === 'new') { showTeamNav(team, role, 'entry');  return renderEntryForm(team, role, null); }
+  if (sub === 'entry'  && id)           { showTeamNav(team, role, 'log');    return renderEntryForm(team, role, id); }
+  if (sub === 'entry')                  { showTeamNav(team, role, 'entry');  return renderEntryForm(team, role, null); }
+  if (sub === 'player' && id === 'new') { showTeamNav(team, role, 'players'); return renderPlayerForm(team, role, null); }
+  if (sub === 'player' && id)           { showTeamNav(team, role, 'players'); return renderPlayerForm(team, role, id); }
+  if (sub === 'players' && id === 'import') { showTeamNav(team, role, 'players'); return renderPlayerImport(team, role); }
+  if (sub === 'game'   && id === 'new') { showTeamNav(team, role, 'schedule'); return renderGameForm(team, role, null); }
+  if (sub === 'game'   && id)           { showTeamNav(team, role, 'schedule'); return renderGameForm(team, role, id); }
+  if (sub === 'games' && id === 'import'){ showTeamNav(team, role, 'schedule'); return renderGameImport(team, role); }
+
   renderNotFound();
 }
 
 /* ================= VIEW: SIGN IN ================= */
 function renderSignIn() {
+  hideTeamNav();
   applyTheme(null);
   $('#app').innerHTML = `
     <div class="card">
@@ -183,6 +261,7 @@ function renderSignIn() {
 
 /* ================= VIEW: CREATE TEAM ================= */
 function renderCreateTeam(session) {
+  hideTeamNav();
   applyTheme(null);
   $('#app').innerHTML = `
     <div class="card">
@@ -252,6 +331,7 @@ function renderCreateTeam(session) {
 
 /* ================= VIEW: TEAM PICKER ================= */
 async function renderTeamPicker(session) {
+  hideTeamNav();
   applyTheme(null);
   const memberships = await fetchMyTeams(session.user.id);
   const list = memberships.map(m => `
@@ -270,59 +350,85 @@ async function renderTeamPicker(session) {
   $('#signout-btn').addEventListener('click', async () => { await supabase.auth.signOut(); });
 }
 
-/* ================= VIEW: TEAM HOME ================= */
-async function renderTeamHome(team, role, session) {
-  // Fetch roster + schedule in parallel
-  const [{ data: players }, { data: games }] = await Promise.all([
-    supabase.from('players').select('id, first_name, last_name, jersey, position, display_order')
-      .eq('team_id', team.id).order('display_order', { ascending: true }).order('jersey', { ascending: true }),
-    supabase.from('games').select('id, date, opponent, home_away')
-      .eq('team_id', team.id).order('date', { ascending: true }),
+/* ================= VIEW: TEAM BATTING (default tab) ================= */
+async function renderTeamBatting(team, role, session) {
+  // Pull players + game_log joined, aggregate client-side
+  const [{ data: players }, { data: logs }] = await Promise.all([
+    supabase.from('players').select('id, first_name, last_name, jersey').eq('team_id', team.id),
+    supabase.from('game_log').select('player_id, ab, r, h, b1, b2, b3, hr, bb, hbp, rbi, sb, game_id').eq('team_id', team.id),
   ]);
+  const playerMap = {};
+  (players || []).forEach(p => {
+    playerMap[p.id] = { id: p.id, first: p.first_name, last: p.last_name || '', jersey: p.jersey,
+      G:0, AB:0, R:0, H:0, '1B':0, '2B':0, '3B':0, HR:0, BB:0, HBP:0, RBI:0, SB:0 };
+  });
+  (logs || []).forEach(r => {
+    const p = playerMap[r.player_id]; if (!p) return;
+    p.G++; p.AB += r.ab||0; p.R += r.r||0; p.H += r.h||0;
+    p['1B'] += r.b1||0; p['2B'] += r.b2||0; p['3B'] += r.b3||0; p.HR += r.hr||0;
+    p.BB += r.bb||0; p.HBP += r.hbp||0; p.RBI += r.rbi||0; p.SB += r.sb||0;
+  });
+  const lines = Object.values(playerMap).map(p => {
+    p.AVG = p.AB > 0 ? p.H / p.AB : 0;
+    const denom = p.AB + p.BB + p.HBP;
+    p.OBP = denom > 0 ? (p.H + p.BB + p.HBP) / denom : 0;
+    return p;
+  }).sort((a,b) => (b.AVG - a.AVG) || (b.H - a.H) || (b.AB - a.AB));
+
+  const team_ = { G: new Set((logs||[]).map(r => r.game_id)).size,
+    AB:0,R:0,H:0,'1B':0,'2B':0,'3B':0,HR:0,BB:0,HBP:0,RBI:0,SB:0 };
+  (logs||[]).forEach(r => {
+    team_.AB+=r.ab||0; team_.R+=r.r||0; team_.H+=r.h||0;
+    team_['1B']+=r.b1||0; team_['2B']+=r.b2||0; team_['3B']+=r.b3||0; team_.HR+=r.hr||0;
+    team_.BB+=r.bb||0; team_.HBP+=r.hbp||0; team_.RBI+=r.rbi||0; team_.SB+=r.sb||0;
+  });
+  team_.AVG = team_.AB > 0 ? team_.H / team_.AB : 0;
+  const d = team_.AB + team_.BB + team_.HBP;
+  team_.OBP = d > 0 ? (team_.H + team_.BB + team_.HBP) / d : 0;
+
+  const head = `<tr><th class="name">Player</th><th>G</th><th>AB</th><th>R</th><th>H</th><th>1B</th><th>2B</th><th>HR</th><th>BB</th><th>HBP</th><th>RBI</th><th>SB</th><th>AVG</th><th>OBP</th></tr>`;
+  const body = lines.map(p => `
+    <tr>
+      <td class="name">${escapeHtml(p.first)} ${escapeHtml(p.last)}</td>
+      <td>${p.G}</td><td>${p.AB}</td><td>${p.R}</td><td>${p.H}</td>
+      <td>${p['1B']}</td><td>${p['2B']}</td><td>${p.HR}</td>
+      <td>${p.BB}</td><td>${p.HBP}</td><td>${p.RBI}</td><td>${p.SB}</td>
+      <td>${fmtAvg(p.AVG)}</td><td>${fmtAvg(p.OBP)}</td>
+    </tr>`).join('');
+  const totals = `
+    <tr class="totals">
+      <td class="name">Team Totals</td>
+      <td>${team_.G}</td><td>${team_.AB}</td><td>${team_.R}</td><td>${team_.H}</td>
+      <td>${team_['1B']}</td><td>${team_['2B']}</td><td>${team_.HR}</td>
+      <td>${team_.BB}</td><td>${team_.HBP}</td><td>${team_.RBI}</td><td>${team_.SB}</td>
+      <td>${fmtAvg(team_.AVG)}</td><td>${fmtAvg(team_.OBP)}</td>
+    </tr>`;
+  const empty = !lines.length ? `<p class="muted small">No roster yet. Tap Players to add some.</p>` : '';
+
+  $('#app').innerHTML = `
+    <div class="section-title">Standard Batting</div>
+    ${empty}
+    ${lines.length ? `<div class="table-wrap"><table class="stats"><thead>${head}</thead><tbody>${body}${totals}</tbody></table></div>` : ''}
+    ${session ? `<div class="card"><button id="signout-btn" class="secondary">Sign out</button></div>` : ''}`;
+  const so = $('#signout-btn');
+  if (so) so.addEventListener('click', async () => { await supabase.auth.signOut(); });
+}
+
+/* ================= VIEW: SCHEDULE TAB ================= */
+async function renderTeamSchedule(team, role, session) {
   const writer = isWriter(role);
-
-  const rosterRows = (players || []).map(p => `
-    <li class="row-item">
-      ${p.jersey ? `<span class="jersey">#${escapeHtml(p.jersey)}</span>` : '<span class="jersey muted">—</span>'}
-      <span class="row-main">${escapeHtml(p.first_name)} ${escapeHtml(p.last_name || '')}</span>
-      ${p.position ? `<span class="row-meta muted">${escapeHtml(p.position)}</span>` : ''}
-      ${writer ? `<a href="#/t/${encodeURIComponent(team.slug)}/player/${encodeURIComponent(p.id)}" class="edit-btn">✎</a>` : ''}
-    </li>`).join('');
-  const rosterBlock = (players && players.length)
-    ? `<ul class="row-list">${rosterRows}</ul>`
-    : `<p class="muted small">No players yet${writer ? ' — tap + Add to add your first.' : '.'}</p>`;
-
-  const scheduleRows = (games || []).map(g => `
+  const { data: games } = await supabase
+    .from('games').select('id, date, opponent, home_away, location')
+    .eq('team_id', team.id).order('date', { ascending: true });
+  const rows = (games || []).map(g => `
     <li class="row-item">
       <span class="jersey">${escapeHtml(dateToMD(g.date))}</span>
       <span class="row-main">${escapeHtml(g.opponent || '')}</span>
       <span class="row-meta muted">${g.home_away === 'away' ? '@' : 'vs'}</span>
       ${writer ? `<a href="#/t/${encodeURIComponent(team.slug)}/game/${encodeURIComponent(g.id)}" class="edit-btn">✎</a>` : ''}
     </li>`).join('');
-  const scheduleBlock = (games && games.length)
-    ? `<ul class="row-list">${scheduleRows}</ul>`
-    : `<p class="muted small">No games yet${writer ? ' — tap + Add to add your first.' : '.'}</p>`;
-
+  const empty = !games?.length ? `<p class="muted small">No games yet${writer ? ' — tap + Add to add one.' : '.'}</p>` : '';
   $('#app').innerHTML = `
-    <div class="card">
-      <h1>${escapeHtml(team.name)}</h1>
-      ${team.season ? `<p class="muted">${escapeHtml(team.season)}</p>` : ''}
-      <p class="muted small">Public URL: <code>${escapeHtml(window.location.origin)}/#/t/${escapeHtml(team.slug)}</code></p>
-      ${session ? '<button id="signout-btn" class="secondary">Sign out</button>' : ''}
-    </div>
-
-    <div class="card">
-      <div class="card-head">
-        <h2>Roster</h2>
-        ${writer ? `
-          <span class="add-group">
-            <a href="#/t/${encodeURIComponent(team.slug)}/player/new" class="add-btn">+ Add</a>
-            <a href="#/t/${encodeURIComponent(team.slug)}/players/import" class="add-btn ghost">Import</a>
-          </span>` : ''}
-      </div>
-      ${rosterBlock}
-    </div>
-
     <div class="card">
       <div class="card-head">
         <h2>Schedule</h2>
@@ -332,11 +438,225 @@ async function renderTeamHome(team, role, session) {
             <a href="#/t/${encodeURIComponent(team.slug)}/games/import" class="add-btn ghost">Import</a>
           </span>` : ''}
       </div>
-      ${scheduleBlock}
+      ${empty || `<ul class="row-list">${rows}</ul>`}
+    </div>`;
+}
+
+/* ================= VIEW: PLAYERS TAB ================= */
+async function renderTeamPlayers(team, role, session) {
+  const writer = isWriter(role);
+  const { data: players } = await supabase
+    .from('players').select('id, first_name, last_name, jersey, position, display_order')
+    .eq('team_id', team.id).order('display_order', { ascending: true }).order('jersey', { ascending: true });
+  const rows = (players || []).map(p => `
+    <li class="row-item">
+      ${p.jersey ? `<span class="jersey">#${escapeHtml(p.jersey)}</span>` : '<span class="jersey muted">—</span>'}
+      <span class="row-main">${escapeHtml(p.first_name)} ${escapeHtml(p.last_name || '')}</span>
+      ${p.position ? `<span class="row-meta muted">${escapeHtml(p.position)}</span>` : ''}
+      ${writer ? `<a href="#/t/${encodeURIComponent(team.slug)}/player/${encodeURIComponent(p.id)}" class="edit-btn">✎</a>` : ''}
+    </li>`).join('');
+  const empty = !players?.length ? `<p class="muted small">No players yet${writer ? ' — tap + Add to add one.' : '.'}</p>` : '';
+  $('#app').innerHTML = `
+    <div class="card">
+      <div class="card-head">
+        <h2>Roster</h2>
+        ${writer ? `
+          <span class="add-group">
+            <a href="#/t/${encodeURIComponent(team.slug)}/player/new" class="add-btn">+ Add</a>
+            <a href="#/t/${encodeURIComponent(team.slug)}/players/import" class="add-btn ghost">Import</a>
+          </span>` : ''}
+      </div>
+      ${empty || `<ul class="row-list">${rows}</ul>`}
+    </div>`;
+}
+
+/* ================= VIEW: GAME LOG TAB ================= */
+async function renderTeamLog(team, role, session) {
+  const writer = isWriter(role);
+  const [{ data: logs }, { data: players }, { data: games }] = await Promise.all([
+    supabase.from('game_log').select('*').eq('team_id', team.id),
+    supabase.from('players').select('id, first_name, last_name, jersey').eq('team_id', team.id),
+    supabase.from('games').select('id, date, opponent, home_away').eq('team_id', team.id),
+  ]);
+  const pMap = {}, gMap = {};
+  (players || []).forEach(p => pMap[p.id] = p);
+  (games   || []).forEach(g => gMap[g.id] = g);
+  // Sort newest game first, then player name
+  const sorted = (logs || []).slice().sort((a, b) => {
+    const da = gMap[a.game_id]?.date || '';
+    const db = gMap[b.game_id]?.date || '';
+    if (db !== da) return db.localeCompare(da);
+    const na = (pMap[a.player_id]?.first_name || '') + (pMap[a.player_id]?.last_name || '');
+    const nb = (pMap[b.player_id]?.first_name || '') + (pMap[b.player_id]?.last_name || '');
+    return na.localeCompare(nb);
+  });
+  const empty = !sorted.length ? `<p class="muted small">No stat entries yet${writer ? ' — tap + Add to enter your first game.' : '.'}</p>` : '';
+  const cards = sorted.map(r => {
+    const p = pMap[r.player_id]; const g = gMap[r.game_id];
+    if (!p || !g) return '';
+    const stats = [
+      r.ab ? `${r.h}-${r.ab}` : null,
+      r.hr ? `HR ${r.hr}` : null,
+      r.bb ? `BB ${r.bb}` : null,
+      r.hbp ? `HBP ${r.hbp}` : null,
+      r.r ? `R ${r.r}` : null,
+      r.rbi ? `RBI ${r.rbi}` : null,
+      r.sb ? `SB ${r.sb}` : null,
+    ].filter(Boolean).join(' · ') || '—';
+    return `
+      <div class="log-card">
+        <div class="top">
+          <span class="who">${escapeHtml(p.first_name)} ${escapeHtml(p.last_name || '')}</span>
+          <span class="when">${escapeHtml(dateToMD(g.date))} ${g.home_away === 'away' ? '@' : 'vs'} ${escapeHtml(g.opponent || '')}</span>
+        </div>
+        <div class="stats">${escapeHtml(stats)}</div>
+        ${r.notes ? `<div class="nt">"${escapeHtml(r.notes)}"</div>` : ''}
+        ${writer ? `<a href="#/t/${encodeURIComponent(team.slug)}/entry/${encodeURIComponent(r.id)}" class="edit-btn">Edit</a>` : ''}
+      </div>`;
+  }).join('');
+  $('#app').innerHTML = `
+    <div class="section-title">Game Log (${sorted.length})</div>
+    ${empty}
+    ${cards}`;
+}
+
+/* ================= VIEW: ENTRY FORM (coach add/edit a player-game) ================= */
+async function renderEntryForm(team, role, entryId) {
+  if (!isWriter(role)) {
+    $('#app').innerHTML = `<div class="card error">Stat entry is for coaches only. <a href="#/t/${encodeURIComponent(team.slug)}">Back</a></div>`;
+    return;
+  }
+  // Load existing entry (if editing) + roster + schedule
+  const [{ data: players }, { data: games }, entryRes] = await Promise.all([
+    supabase.from('players').select('id, first_name, last_name, jersey').eq('team_id', team.id).order('first_name'),
+    supabase.from('games').select('id, date, opponent').eq('team_id', team.id).order('date'),
+    entryId ? supabase.from('game_log').select('*').eq('id', entryId).maybeSingle() : Promise.resolve({ data: null }),
+  ]);
+  const existing = entryRes?.data || null;
+  const initMode = existing ? 'manual' : 'quick';
+  const v = (n) => existing ? (existing[n] ?? 0) : 0;
+  const gameOpts = (games || []).map(g =>
+    `<option value="${g.id}" ${existing && existing.game_id === g.id ? 'selected' : ''}>${escapeHtml(dateToMD(g.date))} ${escapeHtml(g.opponent || '')}</option>`).join('');
+  const playerOpts = (players || []).map(p =>
+    `<option value="${p.id}" ${existing && existing.player_id === p.id ? 'selected' : ''}>${escapeHtml(p.first_name)} ${escapeHtml(p.last_name || '')}</option>`).join('');
+
+  $('#app').innerHTML = `
+    <div class="card">
+      <h1>${existing ? 'Edit stats' : 'Add stats'}</h1>
+      <form id="entry-form" class="auth-form">
+        <label for="ef-game">Game</label>
+        <select id="ef-game" required ${existing ? 'disabled' : ''}>${gameOpts}</select>
+        <label for="ef-player">Player</label>
+        <select id="ef-player" required ${existing ? 'disabled' : ''}>${playerOpts}</select>
+
+        <label>Mode</label>
+        <div class="mode-toggle" role="tablist">
+          <button type="button" class="${initMode === 'quick' ? 'active' : ''}" data-mode="quick">Quick note</button>
+          <button type="button" class="${initMode === 'manual' ? 'active' : ''}" data-mode="manual">Manual fields</button>
+        </div>
+
+        <div id="quick-mode" ${initMode === 'manual' ? 'hidden' : ''}>
+          <label for="ef-note">BR shorthand</label>
+          <textarea id="ef-note" rows="3" placeholder="e.g. 1-3, BB, 2SB, R, RBI">${escapeHtml(existing ? (existing.notes || '') : '')}</textarea>
+          <label>Live preview</label>
+          <div class="preview-pills" id="preview"><span class="muted small">—</span></div>
+        </div>
+
+        <div id="manual-mode" ${initMode === 'quick' ? 'hidden' : ''}>
+          <div class="manual-grid">
+            ${[['ab','AB'],['r','R'],['h','H'],['b1','1B'],['b2','2B'],['hr','HR'],['bb','BB'],['hbp','HBP'],['rbi','RBI'],['sb','SB']]
+              .map(([k,l]) => `<div><label>${l}</label><input type="number" min="0" value="${v(k)}" data-mk="${k}"></div>`).join('')}
+          </div>
+          <label for="ef-manual-notes">Notes</label>
+          <input id="ef-manual-notes" type="text" maxlength="300" value="${escapeHtml(existing ? (existing.notes || '') : '')}" placeholder="optional">
+        </div>
+
+        <button type="submit" class="primary">${existing ? 'Save changes' : 'Save row'}</button>
+        ${existing ? '<button type="button" id="delete-entry" class="danger">Delete this entry</button>' : ''}
+        <a href="#/t/${encodeURIComponent(team.slug)}/log" class="secondary">Cancel</a>
+        <div id="ef-status" class="muted small"></div>
+      </form>
     </div>`;
 
-  const so = $('#signout-btn');
-  if (so) so.addEventListener('click', async () => { await supabase.auth.signOut(); });
+  let mode = initMode;
+  const noteEl = $('#ef-note');
+  const updatePreview = () => {
+    const { stats } = parseNote(noteEl.value);
+    const pills = ['AB','R','H','1B','2B','HR','BB','HBP','RBI','SB']
+      .filter(k => stats[k]).map(k => `<span class="pill">${k} ${stats[k]}</span>`).join('');
+    $('#preview').innerHTML = pills || '<span class="muted small">—</span>';
+  };
+  noteEl.addEventListener('input', updatePreview);
+  if (mode === 'quick') updatePreview();
+
+  $$('.mode-toggle button').forEach(b => b.addEventListener('click', () => {
+    mode = b.dataset.mode;
+    $$('.mode-toggle button').forEach(x => x.classList.toggle('active', x === b));
+    $('#quick-mode').hidden = mode !== 'quick';
+    $('#manual-mode').hidden = mode !== 'manual';
+  }));
+
+  $('#entry-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const gameId = (existing ? existing.game_id : $('#ef-game').value);
+    const playerId = (existing ? existing.player_id : $('#ef-player').value);
+    let row;
+    if (mode === 'quick') {
+      const note = noteEl.value;
+      const { stats } = parseNote(note);
+      row = { team_id: team.id, game_id: gameId, player_id: playerId,
+        ab: stats.AB, r: stats.R, h: stats.H,
+        b1: stats['1B'], b2: stats['2B'], b3: stats['3B'], hr: stats.HR,
+        bb: stats.BB, hbp: stats.HBP, rbi: stats.RBI, sb: stats.SB,
+        notes: note };
+    } else {
+      const m = {};
+      $$('input[data-mk]').forEach(i => m[i.dataset.mk] = parseInt(i.value, 10) || 0);
+      row = { team_id: team.id, game_id: gameId, player_id: playerId,
+        ab: m.ab, r: m.r, h: m.h, b1: m.b1, b2: m.b2, b3: 0, hr: m.hr,
+        bb: m.bb, hbp: m.hbp, rbi: m.rbi, sb: m.sb,
+        notes: $('#ef-manual-notes').value || null };
+    }
+    if (row.h > row.ab) {
+      $('#ef-status').textContent = 'H cannot exceed AB.';
+      $('#ef-status').classList.add('error');
+      return;
+    }
+    const btn = e.target.querySelector('button.primary');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      if (existing) {
+        const { error } = await supabase.from('game_log').update(row).eq('id', existing.id);
+        if (error) throw error;
+      } else {
+        // Upsert on (game_id, player_id) so picking an existing combo edits it
+        const { error } = await supabase.from('game_log').upsert(row, { onConflict: 'game_id,player_id' });
+        if (error) throw error;
+      }
+      toast(existing ? 'Updated' : 'Saved');
+      location.hash = '#/t/' + encodeURIComponent(team.slug) + '/log';
+    } catch (err) {
+      console.error(err);
+      $('#ef-status').textContent = err.message || String(err);
+      $('#ef-status').classList.add('error');
+      btn.disabled = false; btn.textContent = existing ? 'Save changes' : 'Save row';
+    }
+  });
+
+  const del = $('#delete-entry');
+  if (del) {
+    del.addEventListener('click', async () => {
+      if (!confirm('Delete this stat entry?')) return;
+      try {
+        const { error } = await supabase.from('game_log').delete().eq('id', existing.id);
+        if (error) throw error;
+        toast('Deleted');
+        location.hash = '#/t/' + encodeURIComponent(team.slug) + '/log';
+      } catch (err) {
+        toast('Delete failed: ' + (err.message || err), true);
+      }
+    });
+  }
 }
 
 /* ================= VIEW: PLAYER FORM (add or edit) ================= */
