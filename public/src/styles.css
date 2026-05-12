@@ -40,8 +40,8 @@ body.no-nav { padding-bottom: 0; }
 }
 .topbar-logo {
   height: 36px; width: auto; display: block;
-  max-width: 173.88px;
   object-fit: contain;
+  flex-shrink: 0;
 }
 .topbar-logo[hidden] { display: none; }
 .topbar-logo-link { display: inline-flex; align-items: center; line-height: 0; }
