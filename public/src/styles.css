@@ -43,8 +43,32 @@ body { padding-top: 64px; min-height: 100vh; }
 }
 .card h1 { margin: 0 0 8px 0; font-size: 18px; color: var(--navy); }
 .card ul { padding-left: 20px; margin: 8px 0; }
-.card .muted { color: var(--muted); font-size: 12px; margin-top: 12px; }
+.card .muted { color: var(--muted); font-size: 13px; margin-top: 12px; }
+.card .small { font-size: 12px; }
 .card.error { border-color: var(--bad); color: var(--bad); }
+
+/* Auth form */
+.auth-form { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.auth-form label { font-weight: 600; font-size: 13px; }
+.auth-form input[type="email"] {
+  width: 100%; padding: 10px 12px; font-size: 16px;   /* 16px prevents iOS zoom */
+  border: 1px solid var(--row-border); border-radius: 6px;
+  font-family: inherit;
+}
+.auth-form button.primary {
+  background: var(--navy); color: #fff; border: 0; padding: 12px;
+  border-radius: 8px; font-weight: 700; font-size: 15px; cursor: pointer;
+}
+.auth-form button.primary:disabled { background: var(--muted); }
+.auth-form #signin-status { padding: 6px 2px; }
+.auth-form #signin-status.error { color: var(--bad); }
+
+button.secondary {
+  background: #fff; color: var(--navy); border: 1px solid var(--navy);
+  padding: 10px 16px; border-radius: 8px; font-weight: 600; font-size: 14px;
+  cursor: pointer; margin-top: 6px;
+}
+button.secondary:active { background: var(--row-alt); }
 
 /* Skeleton placeholder while booting */
 .skeleton { padding: 4px; }
