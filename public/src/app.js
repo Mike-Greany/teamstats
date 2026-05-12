@@ -1,71 +1,59 @@
 // TeamStats — entry point.
-// Phases done so far: 2 (skeleton) · 3 (magic-link auth) · 4 (create-team wizard).
-// Next: roster + schedule CRUD, then port the existing Teddy 10U views.
+// Phases done: 2 (skeleton) · 3 (magic-link auth) · 4 (create-team wizard) · 5 (roster + schedule CRUD).
+// Up next: 6 (game log + team batting), 7 (player profile), 8 (lineup builder),
+//          9 (settings + theming), 10 (migrate Teddy data + ship).
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth: {
-    persistSession: true,
-    autoRefreshToken: true,
-    detectSessionInUrl: true,
-  },
+  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
 });
 
-const $ = (sel) => document.querySelector(sel);
+const $  = (sel, root) => (root || document).querySelector(sel);
+const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
 
 function escapeHtml(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
-
 function slugify(s) {
-  return String(s || '')
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 60);
+  return String(s || '').toLowerCase().trim()
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
 }
-
 function applyTheme(team) {
   const root = document.documentElement;
-  if (team?.primary_color) root.style.setProperty('--navy', team.primary_color);
-  if (team?.accent_color)  root.style.setProperty('--gold', team.accent_color);
+  root.style.setProperty('--navy', team?.primary_color || '#1f3864');
+  root.style.setProperty('--gold', team?.accent_color  || '#c9a227');
 }
-
-/* ================= ROUTING ================= */
-// Hash routes: #/signin, #/new, #/t/<slug>, #/picker
-function currentRoute() {
-  const h = location.hash.replace(/^#\/?/, '').split('?')[0];
-  const parts = h.split('/').filter(Boolean).map(decodeURIComponent);
-  return { name: parts[0] || '', args: parts.slice(1) };
-}
-
-async function route() {
-  const r = currentRoute();
-  const { data: { session } } = await supabase.auth.getSession();
-
-  // Not signed in → only the sign-in view makes sense.
-  if (!session) { renderSignIn(); return; }
-
-  // Signed in. Decide where to land if user typed bare URL.
-  if (!r.name) {
-    const memberships = await fetchMyTeams(session.user.id);
-    if (memberships.length === 0) { location.hash = '#/new'; return; }
-    if (memberships.length === 1) { location.hash = '#/t/' + memberships[0].teams.slug; return; }
-    location.hash = '#/picker'; return;
+function toast(msg, isError) {
+  let t = $('#toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'toast';
+    document.body.appendChild(t);
   }
-
-  if (r.name === 'new')     return renderCreateTeam(session);
-  if (r.name === 'picker')  return renderTeamPicker(session);
-  if (r.name === 't')       return renderTeamHome(r.args[0], session);
-
-  renderNotFound();
+  t.textContent = msg;
+  t.classList.toggle('error', !!isError);
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2400);
+}
+/** "M/D" for a date input ("2026-05-13" → "5/13"). */
+function dateToMD(iso) {
+  if (!iso) return '';
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  if (!m) return iso;
+  return Number(m[2]) + '/' + Number(m[3]);
+}
+/** "yyyy-mm-dd" for a `<input type="date">` from a Postgres date string. */
+function dateToISO(d) {
+  if (!d) return '';
+  if (/^\d{4}-\d{2}-\d{2}/.test(d)) return d.slice(0, 10);
+  return '';
 }
 
+/* ================= DATA HELPERS ================= */
 async function fetchMyTeams(userId) {
   const { data, error } = await supabase
     .from('team_members')
@@ -73,6 +61,86 @@ async function fetchMyTeams(userId) {
     .eq('user_id', userId);
   if (error) { console.error(error); return []; }
   return data || [];
+}
+async function loadTeamBySlug(slug) {
+  const { data, error } = await supabase
+    .from('teams')
+    .select('id, slug, name, primary_color, accent_color, season, logo_url, league_logo_url, is_public')
+    .eq('slug', slug)
+    .single();
+  if (error) return null;
+  return data;
+}
+async function loadMyRole(teamId, userId) {
+  if (!userId) return null;
+  const { data } = await supabase
+    .from('team_members')
+    .select('role')
+    .eq('team_id', teamId).eq('user_id', userId).maybeSingle();
+  return data?.role || null;
+}
+const isWriter = (role) => role === 'owner' || role === 'coach';
+
+/* ================= ROUTING =================
+ * Hash routes:
+ *   #/                      → root (redirects based on auth/teams)
+ *   #/signin                → email link form
+ *   #/new                   → create team
+ *   #/picker                → multi-team picker
+ *   #/t/<slug>              → team home
+ *   #/t/<slug>/player/new   → add player (coach)
+ *   #/t/<slug>/player/<id>  → edit player (coach)
+ *   #/t/<slug>/game/new     → add game (coach)
+ *   #/t/<slug>/game/<id>    → edit game (coach)
+ */
+function currentRoute() {
+  const h = location.hash.replace(/^#\/?/, '').split('?')[0];
+  const parts = h.split('/').filter(Boolean).map(decodeURIComponent);
+  return { parts };
+}
+async function route() {
+  const { parts } = currentRoute();
+  const { data: { session } } = await supabase.auth.getSession();
+  const top = parts[0] || '';
+
+  // Public team views still work without sign-in
+  if (top === 't') return renderTeamRoute(parts.slice(1), session);
+
+  // Auth-gated routes
+  if (!session) { renderSignIn(); return; }
+
+  if (top === '') {
+    const memberships = await fetchMyTeams(session.user.id);
+    if (memberships.length === 0)  { location.hash = '#/new'; return; }
+    if (memberships.length === 1)  { location.hash = '#/t/' + memberships[0].teams.slug; return; }
+    location.hash = '#/picker'; return;
+  }
+  if (top === 'new')    return renderCreateTeam(session);
+  if (top === 'picker') return renderTeamPicker(session);
+  if (top === 'signin') return renderSignIn();
+
+  renderNotFound();
+}
+async function renderTeamRoute(args, session) {
+  const slug = args[0];
+  if (!slug) { location.hash = '#/'; return; }
+  const team = await loadTeamBySlug(slug);
+  if (!team) {
+    applyTheme(null);
+    $('#app').innerHTML = `<div class="card error">Team not found: <code>${escapeHtml(slug)}</code></div>`;
+    return;
+  }
+  applyTheme(team);
+  const role = session ? await loadMyRole(team.id, session.user.id) : null;
+
+  const sub = args[1];
+  const id  = args[2];
+  if (!sub)                       return renderTeamHome(team, role, session);
+  if (sub === 'player' && id === 'new')  return renderPlayerForm(team, role, null);
+  if (sub === 'player' && id)           return renderPlayerForm(team, role, id);
+  if (sub === 'game'   && id === 'new')  return renderGameForm(team, role, null);
+  if (sub === 'game'   && id)           return renderGameForm(team, role, id);
+  renderNotFound();
 }
 
 /* ================= VIEW: SIGN IN ================= */
@@ -84,13 +152,11 @@ function renderSignIn() {
       <p>Enter your email — we'll send you a one-click sign-in link. No password to remember.</p>
       <form id="signin-form" class="auth-form">
         <label for="email">Email</label>
-        <input id="email" type="email" required autocomplete="email"
-               placeholder="you@example.com">
+        <input id="email" type="email" required autocomplete="email" placeholder="you@example.com">
         <button type="submit" class="primary">Send sign-in link</button>
         <div id="signin-status" class="muted small"></div>
       </form>
     </div>`;
-
   $('#signin-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const email = $('#email').value.trim();
@@ -100,13 +166,10 @@ function renderSignIn() {
     status.textContent = ''; status.classList.remove('error');
     try {
       const { error } = await supabase.auth.signInWithOtp({
-        email,
-        options: { emailRedirectTo: window.location.origin + '/' },
+        email, options: { emailRedirectTo: window.location.origin + '/' },
       });
       if (error) throw error;
-      status.innerHTML =
-        `Check <strong>${escapeHtml(email)}</strong> for a sign-in link. ` +
-        `It usually arrives in under a minute — also peek at spam if it doesn't.`;
+      status.innerHTML = `Check <strong>${escapeHtml(email)}</strong> for a sign-in link.`;
       btn.style.display = 'none';
     } catch (err) {
       status.textContent = 'Error: ' + (err.message || err);
@@ -125,26 +188,18 @@ function renderCreateTeam(session) {
       <p class="muted">A few details to get started. You can change everything later.</p>
       <form id="new-team-form" class="auth-form">
         <label for="t-name">Team name</label>
-        <input id="t-name" type="text" required maxlength="80"
-               placeholder="e.g. Teddy 10U 2026">
+        <input id="t-name" type="text" required maxlength="80" placeholder="e.g. Teddy 10U 2026">
 
         <label for="t-slug">URL slug</label>
-        <input id="t-slug" type="text" required maxlength="60" pattern="[a-z0-9\\-]+"
-               placeholder="auto-suggested from name">
+        <input id="t-slug" type="text" required maxlength="60" pattern="[a-z0-9\\-]+" placeholder="auto-suggested from name">
         <div class="muted small">Your team URL will be <code>${escapeHtml(window.location.origin)}/#/t/<span id="slug-preview">…</span></code></div>
 
         <label for="t-season">Season (optional)</label>
         <input id="t-season" type="text" maxlength="40" placeholder="e.g. 2026 Spring">
 
         <div class="color-row">
-          <div>
-            <label for="t-pcolor">Primary color</label>
-            <input id="t-pcolor" type="color" value="#1f3864">
-          </div>
-          <div>
-            <label for="t-acolor">Accent color</label>
-            <input id="t-acolor" type="color" value="#c9a227">
-          </div>
+          <div><label for="t-pcolor">Primary color</label><input id="t-pcolor" type="color" value="#1f3864"></div>
+          <div><label for="t-acolor">Accent color</label><input id="t-acolor" type="color" value="#c9a227"></div>
         </div>
 
         <button type="submit" class="primary">Create team</button>
@@ -152,32 +207,21 @@ function renderCreateTeam(session) {
         <div id="new-team-status" class="muted small"></div>
       </form>
     </div>`;
-
   const nameEl = $('#t-name'), slugEl = $('#t-slug'), preview = $('#slug-preview');
-  // Live-sync the slug field while the user types in the name, until the user
-  // manually edits the slug (then we stop auto-overwriting).
   let slugTouched = false;
   nameEl.addEventListener('input', () => {
     if (!slugTouched) { slugEl.value = slugify(nameEl.value); preview.textContent = slugEl.value || '…'; }
   });
   slugEl.addEventListener('input', () => {
-    slugTouched = true;
-    slugEl.value = slugify(slugEl.value);
-    preview.textContent = slugEl.value || '…';
+    slugTouched = true; slugEl.value = slugify(slugEl.value); preview.textContent = slugEl.value || '…';
   });
-
-  $('#cancel-create').addEventListener('click', async () => {
-    await supabase.auth.signOut();
-  });
-
+  $('#cancel-create').addEventListener('click', async () => { await supabase.auth.signOut(); });
   $('#new-team-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const name = nameEl.value.trim();
     const slug = slugify(slugEl.value || nameEl.value);
-    if (!slug) return;
     const payload = {
-      name,
-      slug,
+      name, slug,
       season: $('#t-season').value.trim() || null,
       primary_color: $('#t-pcolor').value,
       accent_color:  $('#t-acolor').value,
@@ -187,20 +231,14 @@ function renderCreateTeam(session) {
     const status = $('#new-team-status');
     const btn = e.target.querySelector('button.primary');
     btn.disabled = true; btn.textContent = 'Creating…';
-    status.textContent = ''; status.classList.remove('error');
     try {
-      const { data, error } = await supabase
-        .from('teams')
-        .insert(payload)
-        .select()
-        .single();
+      const { data, error } = await supabase.from('teams').insert(payload).select().single();
       if (error) {
-        if (String(error.message || '').includes('duplicate key')) {
+        if (String(error.message).includes('duplicate key')) {
           throw new Error('That URL slug is already taken — try a different one.');
         }
         throw error;
       }
-      // Trigger added us to team_members automatically.
       location.hash = '#/t/' + data.slug;
     } catch (err) {
       status.textContent = err.message || String(err);
@@ -210,7 +248,7 @@ function renderCreateTeam(session) {
   });
 }
 
-/* ================= VIEW: TEAM PICKER (multi-team) ================= */
+/* ================= VIEW: TEAM PICKER ================= */
 async function renderTeamPicker(session) {
   applyTheme(null);
   const memberships = await fetchMyTeams(session.user.id);
@@ -230,37 +268,244 @@ async function renderTeamPicker(session) {
   $('#signout-btn').addEventListener('click', async () => { await supabase.auth.signOut(); });
 }
 
-/* ================= VIEW: TEAM HOME (placeholder until Phase 5) ================= */
-async function renderTeamHome(slug, session) {
-  if (!slug) { location.hash = '#/'; return; }
-  const { data: team, error } = await supabase
-    .from('teams')
-    .select('id, slug, name, primary_color, accent_color, season')
-    .eq('slug', slug)
-    .single();
-  if (error || !team) {
-    $('#app').innerHTML = `<div class="card error">Team not found: <code>${escapeHtml(slug)}</code></div>`;
-    return;
-  }
-  applyTheme(team);
+/* ================= VIEW: TEAM HOME ================= */
+async function renderTeamHome(team, role, session) {
+  // Fetch roster + schedule in parallel
+  const [{ data: players }, { data: games }] = await Promise.all([
+    supabase.from('players').select('id, first_name, last_name, jersey, position, display_order')
+      .eq('team_id', team.id).order('display_order', { ascending: true }).order('jersey', { ascending: true }),
+    supabase.from('games').select('id, date, opponent, home_away')
+      .eq('team_id', team.id).order('date', { ascending: true }),
+  ]);
+  const writer = isWriter(role);
+
+  const rosterRows = (players || []).map(p => `
+    <li class="row-item">
+      ${p.jersey ? `<span class="jersey">#${escapeHtml(p.jersey)}</span>` : '<span class="jersey muted">—</span>'}
+      <span class="row-main">${escapeHtml(p.first_name)} ${escapeHtml(p.last_name || '')}</span>
+      ${p.position ? `<span class="row-meta muted">${escapeHtml(p.position)}</span>` : ''}
+      ${writer ? `<a href="#/t/${encodeURIComponent(team.slug)}/player/${encodeURIComponent(p.id)}" class="edit-btn">✎</a>` : ''}
+    </li>`).join('');
+  const rosterBlock = (players && players.length)
+    ? `<ul class="row-list">${rosterRows}</ul>`
+    : `<p class="muted small">No players yet${writer ? ' — tap + Add to add your first.' : '.'}</p>`;
+
+  const scheduleRows = (games || []).map(g => `
+    <li class="row-item">
+      <span class="jersey">${escapeHtml(dateToMD(g.date))}</span>
+      <span class="row-main">${escapeHtml(g.opponent || '')}</span>
+      <span class="row-meta muted">${g.home_away === 'away' ? '@' : 'vs'}</span>
+      ${writer ? `<a href="#/t/${encodeURIComponent(team.slug)}/game/${encodeURIComponent(g.id)}" class="edit-btn">✎</a>` : ''}
+    </li>`).join('');
+  const scheduleBlock = (games && games.length)
+    ? `<ul class="row-list">${scheduleRows}</ul>`
+    : `<p class="muted small">No games yet${writer ? ' — tap + Add to add your first.' : '.'}</p>`;
+
   $('#app').innerHTML = `
     <div class="card">
       <h1>${escapeHtml(team.name)}</h1>
       ${team.season ? `<p class="muted">${escapeHtml(team.season)}</p>` : ''}
-      <p>Your team exists ✓. Phase 5 (next session) adds roster + schedule editors, and we'll start porting the Teddy 10U views right after.</p>
-      <p class="muted small">Public team URL (share with parents): <code>${escapeHtml(window.location.origin)}/#/t/${escapeHtml(team.slug)}</code></p>
-      <button id="signout-btn" class="secondary">Sign out</button>
+      <p class="muted small">Public URL: <code>${escapeHtml(window.location.origin)}/#/t/${escapeHtml(team.slug)}</code></p>
+      ${session ? '<button id="signout-btn" class="secondary">Sign out</button>' : ''}
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Roster</h2>
+        ${writer ? `<a href="#/t/${encodeURIComponent(team.slug)}/player/new" class="add-btn">+ Add player</a>` : ''}
+      </div>
+      ${rosterBlock}
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Schedule</h2>
+        ${writer ? `<a href="#/t/${encodeURIComponent(team.slug)}/game/new" class="add-btn">+ Add game</a>` : ''}
+      </div>
+      ${scheduleBlock}
     </div>`;
-  $('#signout-btn').addEventListener('click', async () => { await supabase.auth.signOut(); });
+
+  const so = $('#signout-btn');
+  if (so) so.addEventListener('click', async () => { await supabase.auth.signOut(); });
+}
+
+/* ================= VIEW: PLAYER FORM (add or edit) ================= */
+async function renderPlayerForm(team, role, playerId) {
+  if (!isWriter(role)) {
+    $('#app').innerHTML = `<div class="card error">Only coaches can edit the roster. <a href="#/t/${encodeURIComponent(team.slug)}">Back</a></div>`;
+    return;
+  }
+  let existing = { first_name: '', last_name: '', jersey: '', position: '', display_order: 0 };
+  if (playerId) {
+    const { data, error } = await supabase
+      .from('players')
+      .select('id, first_name, last_name, jersey, position, display_order')
+      .eq('id', playerId).single();
+    if (error || !data) {
+      $('#app').innerHTML = `<div class="card error">Player not found. <a href="#/t/${encodeURIComponent(team.slug)}">Back</a></div>`;
+      return;
+    }
+    existing = data;
+  }
+  $('#app').innerHTML = `
+    <div class="card">
+      <h1>${playerId ? 'Edit player' : 'Add player'}</h1>
+      <form id="player-form" class="auth-form">
+        <div class="color-row">
+          <div><label for="pf-jersey">Jersey #</label>
+            <input id="pf-jersey" type="text" maxlength="10" inputmode="numeric"
+                   value="${escapeHtml(existing.jersey || '')}" placeholder="e.g. 7"></div>
+          <div><label for="pf-pos">Position</label>
+            <input id="pf-pos" type="text" maxlength="100"
+                   value="${escapeHtml(existing.position || '')}" placeholder="e.g. SS / 2B"></div>
+        </div>
+        <label for="pf-first">First name</label>
+        <input id="pf-first" type="text" required maxlength="60" value="${escapeHtml(existing.first_name || '')}">
+        <label for="pf-last">Last name</label>
+        <input id="pf-last" type="text" maxlength="60" value="${escapeHtml(existing.last_name || '')}">
+        <button type="submit" class="primary">${playerId ? 'Save changes' : 'Add player'}</button>
+        ${playerId ? '<button type="button" id="delete-player" class="danger">Delete this player</button>' : ''}
+        <a href="#/t/${encodeURIComponent(team.slug)}" class="secondary">Cancel</a>
+        <div id="pf-status" class="muted small"></div>
+      </form>
+    </div>`;
+
+  $('#player-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const payload = {
+      team_id: team.id,
+      first_name: $('#pf-first').value.trim(),
+      last_name:  $('#pf-last').value.trim(),
+      jersey:     $('#pf-jersey').value.trim() || null,
+      position:   $('#pf-pos').value.trim() || null,
+    };
+    const status = $('#pf-status');
+    const btn = e.target.querySelector('button.primary');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      if (playerId) {
+        const { error } = await supabase.from('players').update(payload).eq('id', playerId);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from('players').insert(payload);
+        if (error) throw error;
+      }
+      toast(playerId ? 'Player updated' : 'Player added');
+      location.hash = '#/t/' + encodeURIComponent(team.slug);
+    } catch (err) {
+      console.error(err);
+      status.textContent = err.message || String(err);
+      status.classList.add('error');
+      btn.disabled = false; btn.textContent = playerId ? 'Save changes' : 'Add player';
+    }
+  });
+
+  const del = $('#delete-player');
+  if (del) {
+    del.addEventListener('click', async () => {
+      if (!confirm(`Delete ${existing.first_name} ${existing.last_name || ''}? This also removes their stats.`)) return;
+      try {
+        const { error } = await supabase.from('players').delete().eq('id', playerId);
+        if (error) throw error;
+        toast('Player deleted');
+        location.hash = '#/t/' + encodeURIComponent(team.slug);
+      } catch (err) {
+        toast('Delete failed: ' + (err.message || err), true);
+      }
+    });
+  }
+}
+
+/* ================= VIEW: GAME FORM (add or edit) ================= */
+async function renderGameForm(team, role, gameId) {
+  if (!isWriter(role)) {
+    $('#app').innerHTML = `<div class="card error">Only coaches can edit the schedule. <a href="#/t/${encodeURIComponent(team.slug)}">Back</a></div>`;
+    return;
+  }
+  let existing = { date: '', opponent: '', home_away: 'home', location: '', game_time: '' };
+  if (gameId) {
+    const { data, error } = await supabase
+      .from('games').select('id, date, opponent, home_away, location, game_time')
+      .eq('id', gameId).single();
+    if (error || !data) {
+      $('#app').innerHTML = `<div class="card error">Game not found. <a href="#/t/${encodeURIComponent(team.slug)}">Back</a></div>`;
+      return;
+    }
+    existing = data;
+  }
+  $('#app').innerHTML = `
+    <div class="card">
+      <h1>${gameId ? 'Edit game' : 'Add game'}</h1>
+      <form id="game-form" class="auth-form">
+        <label for="gf-date">Date</label>
+        <input id="gf-date" type="date" required value="${escapeHtml(dateToISO(existing.date))}">
+        <label for="gf-opp">Opponent</label>
+        <input id="gf-opp" type="text" required maxlength="80" value="${escapeHtml(existing.opponent || '')}" placeholder="e.g. Westfield 10U">
+        <label for="gf-ha">Home / Away</label>
+        <select id="gf-ha">
+          <option value="home" ${existing.home_away === 'home' ? 'selected' : ''}>Home</option>
+          <option value="away" ${existing.home_away === 'away' ? 'selected' : ''}>Away</option>
+        </select>
+        <label for="gf-loc">Location (optional)</label>
+        <input id="gf-loc" type="text" maxlength="120" value="${escapeHtml(existing.location || '')}" placeholder="e.g. Sadie Knox Playground">
+        <label for="gf-time">Time (optional)</label>
+        <input id="gf-time" type="time" value="${escapeHtml(existing.game_time || '')}">
+        <button type="submit" class="primary">${gameId ? 'Save changes' : 'Add game'}</button>
+        ${gameId ? '<button type="button" id="delete-game" class="danger">Delete this game</button>' : ''}
+        <a href="#/t/${encodeURIComponent(team.slug)}" class="secondary">Cancel</a>
+        <div id="gf-status" class="muted small"></div>
+      </form>
+    </div>`;
+
+  $('#game-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const payload = {
+      team_id: team.id,
+      date: $('#gf-date').value,
+      opponent: $('#gf-opp').value.trim(),
+      home_away: $('#gf-ha').value,
+      location: $('#gf-loc').value.trim() || null,
+      game_time: $('#gf-time').value || null,
+    };
+    const status = $('#gf-status');
+    const btn = e.target.querySelector('button.primary');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      if (gameId) {
+        const { error } = await supabase.from('games').update(payload).eq('id', gameId);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from('games').insert(payload);
+        if (error) throw error;
+      }
+      toast(gameId ? 'Game updated' : 'Game added');
+      location.hash = '#/t/' + encodeURIComponent(team.slug);
+    } catch (err) {
+      status.textContent = err.message || String(err);
+      status.classList.add('error');
+      btn.disabled = false; btn.textContent = gameId ? 'Save changes' : 'Add game';
+    }
+  });
+
+  const del = $('#delete-game');
+  if (del) {
+    del.addEventListener('click', async () => {
+      if (!confirm(`Delete the ${existing.date} ${existing.opponent} game? Stats already entered for it will be removed too.`)) return;
+      try {
+        const { error } = await supabase.from('games').delete().eq('id', gameId);
+        if (error) throw error;
+        toast('Game deleted');
+        location.hash = '#/t/' + encodeURIComponent(team.slug);
+      } catch (err) {
+        toast('Delete failed: ' + (err.message || err), true);
+      }
+    });
+  }
 }
 
 /* ================= VIEW: NOT FOUND ================= */
 function renderNotFound() {
-  $('#app').innerHTML = `
-    <div class="card">
-      <h1>Not found</h1>
-      <a href="#/" class="secondary">Go home</a>
-    </div>`;
+  $('#app').innerHTML = `<div class="card"><h1>Not found</h1><a href="#/" class="secondary">Go home</a></div>`;
 }
 
 /* ================= INIT ================= */
