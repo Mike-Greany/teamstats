@@ -37,6 +37,7 @@ function showTeamNav(team, role, activeTab) {
     schedule: `#/t/${slugSafe}/schedule`,
     players:  `#/t/${slugSafe}/players`,
     log:      `#/t/${slugSafe}/log`,
+    lineup:   `#/t/${slugSafe}/lineup`,
     entry:    `#/t/${slugSafe}/entry/new`,
   };
   $$('#bottomnav a').forEach(a => {
@@ -267,6 +268,8 @@ async function renderTeamRoute(args, session) {
   if (sub === 'game'   && id)           { showTeamNav(team, role, 'schedule'); return renderGameForm(team, role, id); }
   if (sub === 'games' && id === 'import'){ showTeamNav(team, role, 'schedule'); return renderGameImport(team, role); }
   if (sub === 'columns')                  { showTeamNav(team, role, 'team');     return renderColumnSettings(team, role); }
+  if (sub === 'lineup' && !id)            { showTeamNav(team, role, 'lineup');   return renderLineupPicker(team, role); }
+  if (sub === 'lineup' && id)             { showTeamNav(team, role, 'lineup');   return renderLineupBuilder(team, role, id); }
 
   renderNotFound();
 }
@@ -1456,12 +1459,205 @@ async function renderGameImport(team, role) {
   });
 }
 
+/* ================= LINEUP CONSTANTS ================= */
+const LINEUP_POSITIONS = ['P','C','1B','2B','3B','SS','LF','LC','CF','RC','RF','Bench'];
+const NUM_INNINGS = 7;
+
+/* ================= VIEW: LINEUP PICKER ================= */
+async function renderLineupPicker(team, role) {
+  const { data: games } = await supabase
+    .from('games').select('id, date, opponent, home_away')
+    .eq('team_id', team.id).order('date');
+  const slugSafe = encodeURIComponent(team.slug);
+  if (!games || !games.length) {
+    $('#app').innerHTML = `<div class="card"><h1>Pick a game</h1>
+      <p class="muted">No games on the schedule yet. <a href="#/t/${slugSafe}/game/new">Add one</a>.</p></div>`;
+    return;
+  }
+  const items = games.map(g => `
+    <a href="#/t/${slugSafe}/lineup/${encodeURIComponent(g.id)}" class="lineup-game-pick">
+      <span><strong>${escapeHtml(dateToMD(g.date))}</strong> &nbsp;
+        ${g.home_away === 'away' ? '@' : 'vs'} ${escapeHtml(g.opponent || '')}</span>
+    </a>`).join('');
+  $('#app').innerHTML = `
+    <div class="section-title">Pick a game</div>
+    ${items}`;
+}
+
+/* ================= VIEW: LINEUP BUILDER ================= */
+async function renderLineupBuilder(team, role, gameId) {
+  const writer = isWriter(role);
+  const slugSafe = encodeURIComponent(team.slug);
+
+  const [{ data: game }, { data: players }, { data: lineup }] = await Promise.all([
+    supabase.from('games').select('id, date, opponent, home_away')
+      .eq('id', gameId).eq('team_id', team.id).maybeSingle(),
+    supabase.from('players').select('id, first_name, last_name, jersey, display_order')
+      .eq('team_id', team.id)
+      .order('display_order', { ascending: true }).order('jersey', { ascending: true }),
+    supabase.from('lineups').select('*').eq('game_id', gameId).maybeSingle(),
+  ]);
+  if (!game) {
+    $('#app').innerHTML = `<div class="card error">Game not found. <a href="#/t/${slugSafe}/lineup">Back</a></div>`;
+    return;
+  }
+  const playerById = {};
+  (players || []).forEach(p => { playerById[p.id] = p; });
+
+  // Existing batting order (UUIDs) + positions (object). Append any roster
+  // players not already in the order so all girls always appear.
+  const savedOrder = Array.isArray(lineup?.batting_order) ? lineup.batting_order : [];
+  const orderSet = new Set(savedOrder);
+  const ordered = [...savedOrder, ...players.filter(p => !orderSet.has(p.id)).map(p => p.id)];
+  const positions = (lineup?.positions && typeof lineup.positions === 'object') ? lineup.positions : {};
+
+  const innArr = (val) => {
+    if (Array.isArray(val)) {
+      const a = val.slice(0, NUM_INNINGS);
+      while (a.length < NUM_INNINGS) a.push('');
+      return a;
+    }
+    return new Array(NUM_INNINGS).fill('');
+  };
+  const inningOptions = (selected, inning) => {
+    let html = `<option value="">I${inning}</option>`;
+    LINEUP_POSITIONS.forEach(p => {
+      html += `<option value="${p}" ${p === selected ? 'selected' : ''}>${p}</option>`;
+    });
+    return html;
+  };
+
+  const headerCells = Array.from({length: NUM_INNINGS}, (_, n) => `<span>I${n+1}</span>`).join('');
+  const ro = writer ? '' : 'lineup-readonly';
+
+  const rowHtml = (pid, i) => {
+    const p = playerById[pid];
+    if (!p) return '';
+    const arr = innArr(positions[pid]);
+    const innings = arr.map((pos, idx) => `
+      <select class="pos-select inn-pos" data-inning="${idx + 1}" ${writer ? '' : 'disabled'}>
+        ${inningOptions(pos, idx + 1)}
+      </select>`).join('');
+    return `
+      <li class="lineup-row" data-pid="${escapeHtml(pid)}">
+        <span class="drag-handle" aria-label="Drag to reorder">⋮⋮</span>
+        <span class="bat-num">${i + 1}</span>
+        <span class="player-name" title="${escapeHtml(p.first_name)} ${escapeHtml(p.last_name || '')}">${escapeHtml(p.first_name)}</span>
+        ${innings}
+      </li>`;
+  };
+
+  $('#app').innerHTML = `
+    <div class="lineup-header">
+      <div>${escapeHtml(dateToMD(game.date))} ${game.home_away === 'away' ? '@' : 'vs'} ${escapeHtml(game.opponent || '')}</div>
+      ${writer ? `<button class="copy-btn" data-action="copy-last-lineup">Copy last game</button>` : ''}
+    </div>
+    ${lineup?.updated_at ? `<div class="lineup-meta">Last saved ${escapeHtml((lineup.updated_at || '').slice(0,16).replace('T',' '))}</div>` : ''}
+    <div class="lineup-grid-header">
+      <span></span><span>#</span><span>Player</span>${headerCells}
+    </div>
+    <ul id="lineup-list" class="lineup-list ${ro}">
+      ${ordered.map((pid, i) => rowHtml(pid, i)).join('')}
+    </ul>
+    ${writer
+      ? `<button class="save-lineup-btn" data-action="save-lineup" data-game="${escapeHtml(gameId)}">Save lineup</button>`
+      : `<div class="empty">Read-only — only the coach can edit the lineup.</div>`}
+  `;
+
+  if (writer && typeof Sortable !== 'undefined') {
+    Sortable.create(document.getElementById('lineup-list'), {
+      handle: '.drag-handle',
+      animation: 150,
+      onSort: () => {
+        document.querySelectorAll('.lineup-row').forEach((li, i) => {
+          li.querySelector('.bat-num').textContent = i + 1;
+        });
+      },
+    });
+  }
+}
+
+async function saveLineupFromUI(gameId) {
+  const order = [];
+  const positions = {};
+  document.querySelectorAll('.lineup-row').forEach(li => {
+    const pid = li.dataset.pid;
+    order.push(pid);
+    const arr = Array.from(li.querySelectorAll('.inn-pos')).map(s => s.value || '');
+    if (arr.some(v => v)) positions[pid] = arr;
+  });
+  const btn = document.querySelector('.save-lineup-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  try {
+    // Need the team_id for the upsert
+    const { data: g } = await supabase.from('games').select('team_id').eq('id', gameId).single();
+    if (!g) throw new Error('Game not found');
+    const { error } = await supabase.from('lineups').upsert({
+      game_id: gameId,
+      team_id: g.team_id,
+      batting_order: order,
+      positions,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'game_id' });
+    if (error) throw error;
+    toast('Lineup saved');
+  } catch (err) {
+    console.error(err);
+    toast('Save failed: ' + (err.message || err), true);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Save lineup'; }
+  }
+}
+
+async function copyLastLineup() {
+  // Fetch most-recently-updated lineup for THIS team
+  const list = document.getElementById('lineup-list');
+  if (!list) return;
+  // We need team context — extract from the first save button's hash route or current URL
+  const m = location.hash.match(/^#\/t\/([^/]+)\/lineup\/([^/]+)/);
+  if (!m) return;
+  const slug = decodeURIComponent(m[1]);
+  const team = await loadTeamBySlug(slug);
+  if (!team) return;
+  const { data: rows } = await supabase
+    .from('lineups').select('batting_order, positions, updated_at, game_id')
+    .eq('team_id', team.id).order('updated_at', { ascending: false }).limit(1);
+  const latest = rows && rows[0];
+  if (!latest) { toast('No saved lineups yet.'); return; }
+  // Apply to DOM
+  const order = Array.isArray(latest.batting_order) ? latest.batting_order : [];
+  const positions = (latest.positions && typeof latest.positions === 'object') ? latest.positions : {};
+  const rowsByPid = {};
+  list.querySelectorAll('.lineup-row').forEach(li => { rowsByPid[li.dataset.pid] = li; });
+  const allPids = Array.from(list.querySelectorAll('.lineup-row')).map(li => li.dataset.pid);
+  const merged = [...order, ...allPids.filter(p => !order.includes(p))];
+  list.innerHTML = '';
+  merged.forEach((pid, i) => {
+    const li = rowsByPid[pid]; if (!li) return;
+    list.appendChild(li);
+    li.querySelector('.bat-num').textContent = i + 1;
+    const arr = Array.isArray(positions[pid]) ? positions[pid] : [];
+    const selects = li.querySelectorAll('.inn-pos');
+    for (let k = 0; k < selects.length; k++) selects[k].value = arr[k] || '';
+  });
+  toast('Copied — Save to commit.');
+}
+
 /* ================= VIEW: NOT FOUND ================= */
 function renderNotFound() {
   $('#app').innerHTML = `<div class="card"><h1>Not found</h1><a href="#/" class="secondary">Go home</a></div>`;
 }
 
 /* ================= INIT ================= */
+// Document-level click dispatcher for data-action elements (used by lineup builder)
+document.addEventListener('click', (e) => {
+  const t = e.target.closest('[data-action]');
+  if (!t) return;
+  const action = t.dataset.action;
+  if (action === 'save-lineup')      saveLineupFromUI(t.dataset.game);
+  else if (action === 'copy-last-lineup') copyLastLineup();
+});
+
 supabase.auth.onAuthStateChange(() => { route(); });
 window.addEventListener('hashchange', () => { route(); });
 
