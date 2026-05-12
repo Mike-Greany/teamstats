@@ -107,7 +107,8 @@ async function resizeImageToBlob(file, maxDim = 800, quality = 0.85) {
   else { canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h; }
   const ctx = canvas.getContext('2d');
   ctx.drawImage(bitmap, 0, 0, w, h);
-  const isPng = file.type === 'image/png';
+  // Some pickers report empty file.type — fall back to extension sniff
+  const isPng = file.type === 'image/png' || /\.png$/i.test(file.name || '');
   const type = isPng ? 'image/png' : 'image/jpeg';
   if (canvas.convertToBlob) {
     return await canvas.convertToBlob(isPng ? { type } : { type, quality });
