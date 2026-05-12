@@ -39,8 +39,8 @@ body.no-nav { padding-bottom: 0; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .topbar-logo {
-  height: 52px; width: auto; display: block;
-  max-width: 240px;
+  height: 36px; width: auto; display: block;
+  max-width: 173.88px;
   object-fit: contain;
 }
 .topbar-logo[hidden] { display: none; }
