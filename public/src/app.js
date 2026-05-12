@@ -138,8 +138,10 @@ async function renderTeamRoute(args, session) {
   if (!sub)                       return renderTeamHome(team, role, session);
   if (sub === 'player' && id === 'new')  return renderPlayerForm(team, role, null);
   if (sub === 'player' && id)           return renderPlayerForm(team, role, id);
+  if (sub === 'players' && id === 'import') return renderPlayerImport(team, role);
   if (sub === 'game'   && id === 'new')  return renderGameForm(team, role, null);
   if (sub === 'game'   && id)           return renderGameForm(team, role, id);
+  if (sub === 'games' && id === 'import') return renderGameImport(team, role);
   renderNotFound();
 }
 
@@ -312,7 +314,11 @@ async function renderTeamHome(team, role, session) {
     <div class="card">
       <div class="card-head">
         <h2>Roster</h2>
-        ${writer ? `<a href="#/t/${encodeURIComponent(team.slug)}/player/new" class="add-btn">+ Add player</a>` : ''}
+        ${writer ? `
+          <span class="add-group">
+            <a href="#/t/${encodeURIComponent(team.slug)}/player/new" class="add-btn">+ Add</a>
+            <a href="#/t/${encodeURIComponent(team.slug)}/players/import" class="add-btn ghost">Import</a>
+          </span>` : ''}
       </div>
       ${rosterBlock}
     </div>
@@ -320,7 +326,11 @@ async function renderTeamHome(team, role, session) {
     <div class="card">
       <div class="card-head">
         <h2>Schedule</h2>
-        ${writer ? `<a href="#/t/${encodeURIComponent(team.slug)}/game/new" class="add-btn">+ Add game</a>` : ''}
+        ${writer ? `
+          <span class="add-group">
+            <a href="#/t/${encodeURIComponent(team.slug)}/game/new" class="add-btn">+ Add</a>
+            <a href="#/t/${encodeURIComponent(team.slug)}/games/import" class="add-btn ghost">Import</a>
+          </span>` : ''}
       </div>
       ${scheduleBlock}
     </div>`;
@@ -501,6 +511,242 @@ async function renderGameForm(team, role, gameId) {
       }
     });
   }
+}
+
+/* ================= CSV PARSING HELPERS ================= */
+/** Tolerant line parser. Splits on comma OR tab. Trims fields. */
+function parseRows(text) {
+  return String(text || '')
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line.length > 0 && !line.startsWith('#'))
+    .map(line => line.split(/[,\t]/).map(f => f.trim()));
+}
+/** Detects + strips a header row if the first row looks like field names. */
+function stripHeader(rows, headerWords) {
+  if (!rows.length) return rows;
+  const first = rows[0].map(s => s.toLowerCase());
+  const hits = first.filter(w => headerWords.includes(w)).length;
+  return hits >= 1 ? rows.slice(1) : rows;
+}
+/** Parse a roster CSV. Each row: [jersey?, first, last?] OR [first, last?] OR [first only].
+ *  Returns array of {jersey, first_name, last_name}. */
+function parseRosterCSV(text) {
+  let rows = parseRows(text);
+  rows = stripHeader(rows, ['jersey','first','last','name','#','position']);
+  return rows.map(r => {
+    if (r.length === 1) {
+      // "First Last" in one field — split by space
+      const parts = r[0].split(/\s+/);
+      return { jersey: null, first_name: parts[0] || '', last_name: parts.slice(1).join(' ') };
+    }
+    if (r.length === 2) {
+      return { jersey: null, first_name: r[0], last_name: r[1] };
+    }
+    // 3+ columns: jersey, first, last (extra cols ignored)
+    const looksLikeJersey = /^\d{1,3}$/.test(r[0]);
+    if (looksLikeJersey) {
+      return { jersey: r[0], first_name: r[1] || '', last_name: r[2] || '' };
+    }
+    // not a jersey number → treat as first,last,position-ish
+    return { jersey: null, first_name: r[0], last_name: r[1] };
+  }).filter(p => p.first_name);
+}
+/** Parse a date in any of: 2026-05-09 | 5/9 | 5/9/26 | 5/9/2026 → ISO yyyy-mm-dd */
+function parseDate(s) {
+  s = String(s || '').trim();
+  let m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(s);
+  if (m) return `${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`;
+  m = /^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/.exec(s);
+  if (m) {
+    let yr = m[3] ? Number(m[3]) : new Date().getFullYear();
+    if (yr < 100) yr += 2000;
+    return `${yr}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`;
+  }
+  return '';
+}
+/** Parse a schedule CSV. Each row: [date, opponent, home_away?, location?, time?].
+ *  Returns array of {date, opponent, home_away, location, game_time}. */
+function parseScheduleCSV(text) {
+  let rows = parseRows(text);
+  rows = stripHeader(rows, ['date','opponent','home','away','home/away','location','time']);
+  return rows.map(r => {
+    const date = parseDate(r[0]);
+    const opp  = r[1] || '';
+    const ha   = (r[2] || '').toLowerCase();
+    const home_away = ha === 'away' || ha === '@' || ha === 'a' ? 'away' : 'home';
+    const location  = r[3] || null;
+    const game_time = r[4] && /^\d{1,2}:\d{2}/.test(r[4]) ? r[4] : null;
+    return { date, opponent: opp, home_away, location, game_time };
+  }).filter(g => g.date && g.opponent);
+}
+
+/* ================= VIEW: IMPORT ROSTER (coach-only) ================= */
+async function renderPlayerImport(team, role) {
+  if (!isWriter(role)) {
+    $('#app').innerHTML = `<div class="card error">Only coaches can import. <a href="#/t/${encodeURIComponent(team.slug)}">Back</a></div>`;
+    return;
+  }
+  $('#app').innerHTML = `
+    <div class="card">
+      <h1>Import roster</h1>
+      <p class="muted small">
+        Paste rows below, or pick a <code>.csv</code> / <code>.txt</code> file. Each row should be
+        <code>jersey,first,last</code>. Any of these also work:
+      </p>
+      <pre class="muted small example">jersey,first,last
+7,Emily,Chase
+4,Marliey,Marte
+
+Emily Chase
+Marliey Marte
+
+Emily,Chase
+Marliey,Marte</pre>
+      <form id="import-form" class="auth-form">
+        <label for="ri-file">From file</label>
+        <input id="ri-file" type="file" accept=".csv,.txt,text/csv,text/plain">
+        <label for="ri-text">Or paste here</label>
+        <textarea id="ri-text" rows="8" placeholder="One player per line..."></textarea>
+        <button type="button" id="preview-btn" class="secondary">Preview</button>
+        <div id="preview-area"></div>
+        <button type="submit" class="primary" id="commit-btn" disabled>Import 0 players</button>
+        <a href="#/t/${encodeURIComponent(team.slug)}" class="secondary">Cancel</a>
+        <div id="ri-status" class="muted small"></div>
+      </form>
+    </div>`;
+
+  const fileEl = $('#ri-file'), textEl = $('#ri-text'), previewArea = $('#preview-area');
+  const commitBtn = $('#commit-btn');
+  let parsed = [];
+
+  fileEl.addEventListener('change', async () => {
+    const f = fileEl.files[0]; if (!f) return;
+    textEl.value = await f.text();
+  });
+
+  $('#preview-btn').addEventListener('click', () => {
+    parsed = parseRosterCSV(textEl.value);
+    if (!parsed.length) {
+      previewArea.innerHTML = `<div class="muted small">Nothing parsed yet — check the format.</div>`;
+      commitBtn.disabled = true;
+      commitBtn.textContent = 'Import 0 players';
+      return;
+    }
+    previewArea.innerHTML = `
+      <ul class="row-list preview-list">
+        ${parsed.map(p => `<li class="row-item">
+          ${p.jersey ? `<span class="jersey">#${escapeHtml(p.jersey)}</span>` : '<span class="jersey muted">—</span>'}
+          <span class="row-main">${escapeHtml(p.first_name)} ${escapeHtml(p.last_name || '')}</span>
+        </li>`).join('')}
+      </ul>`;
+    commitBtn.disabled = false;
+    commitBtn.textContent = `Import ${parsed.length} player${parsed.length === 1 ? '' : 's'}`;
+  });
+
+  $('#import-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!parsed.length) return;
+    const status = $('#ri-status');
+    commitBtn.disabled = true; commitBtn.textContent = 'Importing…';
+    try {
+      const rows = parsed.map((p, i) => ({
+        team_id: team.id,
+        first_name: p.first_name,
+        last_name: p.last_name || '',
+        jersey: p.jersey || null,
+        display_order: i,
+      }));
+      const { error } = await supabase.from('players').insert(rows);
+      if (error) throw error;
+      toast(`Imported ${rows.length} players`);
+      location.hash = '#/t/' + encodeURIComponent(team.slug);
+    } catch (err) {
+      console.error(err);
+      status.textContent = err.message || String(err);
+      status.classList.add('error');
+      commitBtn.disabled = false; commitBtn.textContent = `Import ${parsed.length} players`;
+    }
+  });
+}
+
+/* ================= VIEW: IMPORT SCHEDULE (coach-only) ================= */
+async function renderGameImport(team, role) {
+  if (!isWriter(role)) {
+    $('#app').innerHTML = `<div class="card error">Only coaches can import. <a href="#/t/${encodeURIComponent(team.slug)}">Back</a></div>`;
+    return;
+  }
+  $('#app').innerHTML = `
+    <div class="card">
+      <h1>Import schedule</h1>
+      <p class="muted small">
+        Paste rows below, or pick a <code>.csv</code> / <code>.txt</code> file. Each row should be
+        <code>date,opponent,home/away,location,time</code> (only date + opponent required).
+      </p>
+      <pre class="muted small example">date,opponent,home/away,location,time
+2026-05-09,Westfield,home,Sadie Knox,12:00
+5/11,Northampton,home
+5/13,Southampton,away
+5/16,Westfield,home</pre>
+      <form id="import-form" class="auth-form">
+        <label for="gi-file">From file</label>
+        <input id="gi-file" type="file" accept=".csv,.txt,text/csv,text/plain">
+        <label for="gi-text">Or paste here</label>
+        <textarea id="gi-text" rows="8" placeholder="One game per line..."></textarea>
+        <button type="button" id="preview-btn" class="secondary">Preview</button>
+        <div id="preview-area"></div>
+        <button type="submit" class="primary" id="commit-btn" disabled>Import 0 games</button>
+        <a href="#/t/${encodeURIComponent(team.slug)}" class="secondary">Cancel</a>
+        <div id="gi-status" class="muted small"></div>
+      </form>
+    </div>`;
+
+  const fileEl = $('#gi-file'), textEl = $('#gi-text'), previewArea = $('#preview-area');
+  const commitBtn = $('#commit-btn');
+  let parsed = [];
+
+  fileEl.addEventListener('change', async () => {
+    const f = fileEl.files[0]; if (!f) return;
+    textEl.value = await f.text();
+  });
+
+  $('#preview-btn').addEventListener('click', () => {
+    parsed = parseScheduleCSV(textEl.value);
+    if (!parsed.length) {
+      previewArea.innerHTML = `<div class="muted small">Nothing parsed yet — check the format.</div>`;
+      commitBtn.disabled = true;
+      commitBtn.textContent = 'Import 0 games';
+      return;
+    }
+    previewArea.innerHTML = `
+      <ul class="row-list preview-list">
+        ${parsed.map(g => `<li class="row-item">
+          <span class="jersey">${escapeHtml(dateToMD(g.date))}</span>
+          <span class="row-main">${escapeHtml(g.opponent)}</span>
+          <span class="row-meta muted">${g.home_away === 'away' ? '@' : 'vs'}</span>
+        </li>`).join('')}
+      </ul>`;
+    commitBtn.disabled = false;
+    commitBtn.textContent = `Import ${parsed.length} game${parsed.length === 1 ? '' : 's'}`;
+  });
+
+  $('#import-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!parsed.length) return;
+    const status = $('#gi-status');
+    commitBtn.disabled = true; commitBtn.textContent = 'Importing…';
+    try {
+      const rows = parsed.map(g => ({ team_id: team.id, ...g }));
+      const { error } = await supabase.from('games').insert(rows);
+      if (error) throw error;
+      toast(`Imported ${rows.length} games`);
+      location.hash = '#/t/' + encodeURIComponent(team.slug);
+    } catch (err) {
+      status.textContent = err.message || String(err);
+      status.classList.add('error');
+      commitBtn.disabled = false; commitBtn.textContent = `Import ${parsed.length} games`;
+    }
+  });
 }
 
 /* ================= VIEW: NOT FOUND ================= */

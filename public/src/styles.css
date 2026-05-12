@@ -108,6 +108,31 @@ a.secondary.block { display: block; width: 100%; text-align: center; }
   padding: 5px 10px; border-radius: 6px;
   text-decoration: none; font-weight: 700; font-size: 12px;
 }
+.add-btn.ghost {
+  background: transparent; color: var(--navy);
+  border: 1px solid var(--navy);
+  margin-left: 6px;
+}
+.add-group { display: inline-flex; align-items: center; }
+
+.auth-form textarea {
+  width: 100%; padding: 10px 12px; font-size: 14px;
+  border: 1px solid var(--row-border); border-radius: 6px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  resize: vertical;
+}
+.auth-form input[type="file"] {
+  width: 100%; padding: 8px;
+  border: 1px solid var(--row-border); border-radius: 6px; background: #fff;
+}
+.example {
+  background: var(--row-alt); padding: 8px 10px; border-radius: 6px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
+  white-space: pre-wrap; word-break: break-word;
+  margin: 4px 0 12px;
+}
+.preview-list { max-height: 240px; overflow-y: auto; border: 1px dashed var(--row-border);
+  border-radius: 6px; padding: 4px 8px; margin-top: 6px; background: #fff; }
 
 /* Roster / Schedule list rows */
 .row-list { list-style: none; padding: 0; margin: 0; }
