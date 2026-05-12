@@ -135,6 +135,50 @@ a.secondary.block { display: block; width: 100%; text-align: center; }
 .preview-list { max-height: 240px; overflow-y: auto; border: 1px dashed var(--row-border);
   border-radius: 6px; padding: 4px 8px; margin-top: 6px; background: #fff; }
 
+/* Player profile */
+.summary-chips {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 12px 14px;
+  background: var(--navy); color: #fff;
+  border-bottom: 2px solid var(--gold);
+  margin: 0 -16px;
+}
+.summary-chips .chip {
+  background: rgba(255,255,255,0.14); padding: 4px 10px; border-radius: 16px;
+  font-size: 12px; font-weight: 600; white-space: nowrap;
+}
+.summary-chips .chip.avg { background: var(--gold); color: var(--navy); }
+
+.profile-card {
+  background: #fff; border: 1px solid var(--row-border); border-radius: 10px;
+  padding: 14px 16px; margin: 0 0 16px 0; position: relative;
+}
+.profile-card.empty { text-align: center; color: var(--muted); }
+.profile-card .prof-jersey {
+  position: absolute; top: -8px; right: 12px;
+  background: var(--navy); color: #fff;
+  padding: 4px 10px; border-radius: 12px;
+  font-weight: 700; font-size: 14px; letter-spacing: 0.5px;
+  border: 2px solid var(--gold);
+}
+.prof-list { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 4px 0; }
+.prof-list dt { font-weight: 600; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px; }
+.prof-list dd { margin: 0; font-size: 14px; }
+.prof-bio {
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--row-border);
+  font-style: italic; color: #333;
+}
+.swatch {
+  display: inline-block; width: 14px; height: 14px; border-radius: 3px;
+  border: 1px solid rgba(0,0,0,0.15); vertical-align: middle; margin-right: 4px;
+}
+.row-link { color: inherit; text-decoration: none; font-weight: 600; }
+.row-link:active { color: var(--navy); }
+
+/* Form sub-row (Bats / Throws side-by-side) */
+.auth-form .row { display: flex; gap: 10px; }
+.auth-form .row > div { flex: 1; min-width: 0; }
+
 /* Coach column-visibility check list */
 .check-row {
   display: flex; align-items: center; gap: 10px;

@@ -208,8 +208,9 @@ async function renderTeamRoute(args, session) {
   setBrand(team.name);
   const role = session ? await loadMyRole(team.id, session.user.id) : null;
 
-  const sub = args[1];
-  const id  = args[2];
+  const sub  = args[1];
+  const id   = args[2];
+  const arg3 = args[3];
 
   // Tabbed views
   if (!sub)                  { showTeamNav(team, role, 'team');     return renderTeamBatting(team, role, session); }
@@ -222,7 +223,9 @@ async function renderTeamRoute(args, session) {
   if (sub === 'entry'  && id)           { showTeamNav(team, role, 'log');    return renderEntryForm(team, role, id); }
   if (sub === 'entry')                  { showTeamNav(team, role, 'entry');  return renderEntryForm(team, role, null); }
   if (sub === 'player' && id === 'new') { showTeamNav(team, role, 'players'); return renderPlayerForm(team, role, null); }
-  if (sub === 'player' && id)           { showTeamNav(team, role, 'players'); return renderPlayerForm(team, role, id); }
+  if (sub === 'player' && id && arg3 === 'edit') { showTeamNav(team, role, 'players'); return renderPlayerForm(team, role, id); }
+  if (sub === 'player' && id && arg3 === 'info') { showTeamNav(team, role, 'players'); return renderProfileInfoEdit(team, role, id); }
+  if (sub === 'player' && id)           { showTeamNav(team, role, 'players'); return renderPlayerProfile(team, role, id, session); }
   if (sub === 'players' && id === 'import') { showTeamNav(team, role, 'players'); return renderPlayerImport(team, role); }
   if (sub === 'game'   && id === 'new') { showTeamNav(team, role, 'schedule'); return renderGameForm(team, role, null); }
   if (sub === 'game'   && id)           { showTeamNav(team, role, 'schedule'); return renderGameForm(team, role, id); }
@@ -550,12 +553,13 @@ async function renderTeamPlayers(team, role, session) {
   const { data: players } = await supabase
     .from('players').select('id, first_name, last_name, jersey, position, display_order')
     .eq('team_id', team.id).order('display_order', { ascending: true }).order('jersey', { ascending: true });
+  const slugSafe = encodeURIComponent(team.slug);
   const rows = (players || []).map(p => `
     <li class="row-item">
       ${p.jersey ? `<span class="jersey">#${escapeHtml(p.jersey)}</span>` : '<span class="jersey muted">—</span>'}
-      <span class="row-main">${escapeHtml(p.first_name)} ${escapeHtml(p.last_name || '')}</span>
+      <a href="#/t/${slugSafe}/player/${encodeURIComponent(p.id)}" class="row-main row-link">${escapeHtml(p.first_name)} ${escapeHtml(p.last_name || '')}</a>
       ${p.position ? `<span class="row-meta muted">${escapeHtml(p.position)}</span>` : ''}
-      ${writer ? `<a href="#/t/${encodeURIComponent(team.slug)}/player/${encodeURIComponent(p.id)}" class="edit-btn">✎</a>` : ''}
+      ${writer ? `<a href="#/t/${slugSafe}/player/${encodeURIComponent(p.id)}/edit" class="edit-btn">✎</a>` : ''}
     </li>`).join('');
   const empty = !players?.length ? `<p class="muted small">No players yet${writer ? ' — tap + Add to add one.' : '.'}</p>` : '';
   $('#app').innerHTML = `
@@ -564,8 +568,8 @@ async function renderTeamPlayers(team, role, session) {
         <h2>Roster</h2>
         ${writer ? `
           <span class="add-group">
-            <a href="#/t/${encodeURIComponent(team.slug)}/player/new" class="add-btn">+ Add</a>
-            <a href="#/t/${encodeURIComponent(team.slug)}/players/import" class="add-btn ghost">Import</a>
+            <a href="#/t/${slugSafe}/player/new" class="add-btn">+ Add</a>
+            <a href="#/t/${slugSafe}/players/import" class="add-btn ghost">Import</a>
           </span>` : ''}
       </div>
       ${empty || `<ul class="row-list">${rows}</ul>`}
@@ -624,6 +628,201 @@ async function renderTeamLog(team, role, session) {
     <div class="section-title">Game Log (${sorted.length})</div>
     ${empty}
     ${cards}`;
+}
+
+/* ================= VIEW: PLAYER PROFILE (public) ================= */
+async function renderPlayerProfile(team, role, playerId, session) {
+  const { data: player, error } = await supabase
+    .from('players').select('*')
+    .eq('id', playerId).eq('team_id', team.id).single();
+  if (error || !player) {
+    $('#app').innerHTML = `<div class="card error">Player not found. <a href="#/t/${encodeURIComponent(team.slug)}/players">Back to roster</a></div>`;
+    return;
+  }
+  const writer = isWriter(role);
+  const cols = visibleCols(team, role);
+  const slugSafe = encodeURIComponent(team.slug);
+  const playerIdSafe = encodeURIComponent(player.id);
+
+  const [{ data: games }, { data: logs }] = await Promise.all([
+    supabase.from('games').select('id, date, opponent, home_away').eq('team_id', team.id).order('date'),
+    supabase.from('game_log').select('*').eq('team_id', team.id).eq('player_id', playerId),
+  ]);
+  const logByGame = {};
+  (logs || []).forEach(r => { logByGame[r.game_id] = r; });
+  const sortedGames = (games || []).slice().sort((a,b) => (a.date || '').localeCompare(b.date || ''));
+
+  // Build season + cumulative
+  let cum = { AB:0,R:0,H:0,'1B':0,'2B':0,HR:0,BB:0,HBP:0,RBI:0,SB:0,K:0,K_LOOKING:0 };
+  const rowsBuilt = sortedGames.map(g => {
+    const r = logByGame[g.id];
+    if (r) {
+      cum.AB+=r.ab||0; cum.R+=r.r||0; cum.H+=r.h||0;
+      cum['1B']+=r.b1||0; cum['2B']+=r.b2||0; cum.HR+=r.hr||0;
+      cum.BB+=r.bb||0; cum.HBP+=r.hbp||0; cum.RBI+=r.rbi||0; cum.SB+=r.sb||0;
+      cum.K+=r.k||0;   cum.K_LOOKING+=r.k_looking||0;
+    }
+    return { g, r, cum: { ...cum } };
+  });
+  const season = { ...cum, G: rowsBuilt.filter(x => x.r).length };
+  season.AVG = season.AB > 0 ? season.H / season.AB : 0;
+  const d = season.AB + season.BB + season.HBP;
+  season.OBP = d > 0 ? (season.H + season.BB + season.HBP) / d : 0;
+
+  // Per-game stat cells, respecting hidden columns
+  const cellCols = cols.filter(c => c.dbKey !== 'g');
+  const cellVal = (log, cumLine, c) => {
+    if (c.dbKey === 'avg') return log ? fmtAvg(cumLine.AB > 0 ? cumLine.H / cumLine.AB : 0) : '—';
+    if (c.dbKey === 'obp') {
+      if (!log) return '—';
+      const dd = cumLine.AB + cumLine.BB + cumLine.HBP;
+      return fmtAvg(dd > 0 ? (cumLine.H + cumLine.BB + cumLine.HBP) / dd : 0);
+    }
+    if (!log) return '—';
+    const map = { ab: log.ab, r: log.r, h: log.h, b1: log.b1, b2: log.b2,
+      hr: log.hr, bb: log.bb, hbp: log.hbp, rbi: log.rbi, sb: log.sb,
+      k: log.k, k_looking: log.k_looking };
+    return map[c.dbKey] || 0;
+  };
+  const head = `<tr><th>Date</th><th class="name">Opp</th>${cellCols.map(c => `<th>${c.label}</th>`).join('')}</tr>`;
+  const tbody = rowsBuilt.map(({ g, r, cum: c }) =>
+    `<tr><td>${escapeHtml(dateToMD(g.date))}</td><td class="name">${g.home_away === 'away' ? '@' : 'vs'} ${escapeHtml(g.opponent || '')}</td>` +
+    cellCols.map(col => `<td>${cellVal(r, c, col)}</td>`).join('') + `</tr>`).join('');
+  const seasonCells = cellCols.map(col => {
+    if (col.dbKey === 'avg') return fmtAvg(season.AVG);
+    if (col.dbKey === 'obp') return fmtAvg(season.OBP);
+    const map = { ab: season.AB, r: season.R, h: season.H,
+      b1: season['1B'], b2: season['2B'], hr: season.HR,
+      bb: season.BB, hbp: season.HBP, rbi: season.RBI, sb: season.SB,
+      k: season.K, k_looking: season.K_LOOKING };
+    return map[col.dbKey] || 0;
+  });
+  const seasonRow = `<tr class="totals"><td>Season</td><td class="name"></td>` +
+    seasonCells.map(c => `<td>${c}</td>`).join('') + `</tr>`;
+
+  // Profile info card
+  const handLabel = (v) => v === 'L' ? 'Left' : v === 'R' ? 'Right' : v === 'S' ? 'Switch' : '';
+  const hasInfo = player.position || player.bats || player.throws || player.height
+    || player.age || player.dob || player.favorite_color || player.bio;
+  const editInfoBtn = writer
+    ? `<a href="#/t/${slugSafe}/player/${playerIdSafe}/info" class="secondary block">Edit info</a>` : '';
+  const profileCard = hasInfo ? `
+    <div class="profile-card">
+      ${player.jersey ? `<div class="prof-jersey">#${escapeHtml(player.jersey)}</div>` : ''}
+      <dl class="prof-list">
+        ${player.position ? `<dt>Position</dt><dd>${escapeHtml(player.position)}</dd>` : ''}
+        ${player.bats ? `<dt>Bats</dt><dd>${escapeHtml(handLabel(player.bats))}</dd>` : ''}
+        ${player.throws ? `<dt>Throws</dt><dd>${escapeHtml(handLabel(player.throws))}</dd>` : ''}
+        ${player.height ? `<dt>Height</dt><dd>${escapeHtml(player.height)}</dd>` : ''}
+        ${player.age ? `<dt>Age</dt><dd>${escapeHtml(player.age)}</dd>` : ''}
+        ${player.dob ? `<dt>Born</dt><dd>${escapeHtml(player.dob)}</dd>` : ''}
+        ${player.favorite_color ? `<dt>Favorite color</dt><dd><span class="swatch" style="background:${escapeHtml(player.favorite_color)}"></span> ${escapeHtml(player.favorite_color)}</dd>` : ''}
+      </dl>
+      ${player.bio ? `<div class="prof-bio">"${escapeHtml(player.bio)}"</div>` : ''}
+      ${editInfoBtn}
+    </div>` : `
+    <div class="profile-card empty">
+      <p>No info on ${escapeHtml(player.first_name)} yet${writer ? '' : '.'}</p>
+      ${writer ? `<a href="#/t/${slugSafe}/player/${playerIdSafe}/info" class="add-btn">Add player info</a>` : ''}
+    </div>`;
+
+  // Title bar: full name centered with optional jersey badge
+  setBrand(`${player.first_name} ${player.last_name || ''}${player.jersey ? '  #' + player.jersey : ''}`);
+
+  $('#app').innerHTML = `
+    <div class="summary-chips">
+      <span class="chip">G ${season.G}</span>
+      <span class="chip">AB ${season.AB}</span>
+      <span class="chip">H ${season.H}</span>
+      <span class="chip">BB ${season.BB}</span>
+      <span class="chip">R ${season.R}</span>
+      <span class="chip">RBI ${season.RBI}</span>
+      <span class="chip">SB ${season.SB}</span>
+      <span class="chip avg">AVG ${fmtAvg(season.AVG)}</span>
+      <span class="chip avg">OBP ${fmtAvg(season.OBP)}</span>
+    </div>
+    <div class="section-title">Game Log</div>
+    <div class="table-wrap"><table class="stats"><thead>${head}</thead><tbody>${tbody}${seasonRow}</tbody></table></div>
+    <div class="section-title">Player Info</div>
+    ${profileCard}`;
+}
+
+/* ================= VIEW: PROFILE INFO EDIT (coach-only for now) ================= */
+async function renderProfileInfoEdit(team, role, playerId) {
+  if (!isWriter(role)) {
+    $('#app').innerHTML = `<div class="card error">Editing player info is coach-only for now. <a href="#/t/${encodeURIComponent(team.slug)}/player/${encodeURIComponent(playerId)}">Back</a></div>`;
+    return;
+  }
+  const { data: player, error } = await supabase
+    .from('players').select('*').eq('id', playerId).eq('team_id', team.id).single();
+  if (error || !player) {
+    $('#app').innerHTML = `<div class="card error">Player not found.</div>`;
+    return;
+  }
+  const slugSafe = encodeURIComponent(team.slug);
+  const playerIdSafe = encodeURIComponent(player.id);
+  const v = (k) => escapeHtml(player[k] || '');
+  $('#app').innerHTML = `
+    <div class="card">
+      <h1>Edit info for ${escapeHtml(player.first_name)} ${escapeHtml(player.last_name || '')}</h1>
+      <form id="info-form" class="auth-form">
+        <div class="row">
+          <div><label for="if-bats">Bats</label>
+            <select id="if-bats">
+              <option value=""  ${!player.bats ? 'selected' : ''}>—</option>
+              <option value="L" ${player.bats==='L' ? 'selected' : ''}>Left</option>
+              <option value="R" ${player.bats==='R' ? 'selected' : ''}>Right</option>
+              <option value="S" ${player.bats==='S' ? 'selected' : ''}>Switch</option>
+            </select></div>
+          <div><label for="if-throws">Throws</label>
+            <select id="if-throws">
+              <option value=""  ${!player.throws ? 'selected' : ''}>—</option>
+              <option value="L" ${player.throws==='L' ? 'selected' : ''}>Left</option>
+              <option value="R" ${player.throws==='R' ? 'selected' : ''}>Right</option>
+            </select></div>
+        </div>
+        <div class="row">
+          <div><label for="if-height">Height</label>
+            <input id="if-height" type="text" maxlength="20" value="${v('height')}" placeholder="e.g. 4'7&quot;"></div>
+          <div><label for="if-age">Age</label>
+            <input id="if-age" type="text" inputmode="numeric" maxlength="20" value="${v('age')}"></div>
+        </div>
+        <label for="if-dob">Birthday</label>
+        <input id="if-dob" type="text" maxlength="20" value="${v('dob')}" placeholder="e.g. May 9 or 5/9">
+        <label for="if-color">Favorite color</label>
+        <input id="if-color" type="text" maxlength="50" value="${v('favorite_color')}" placeholder="e.g. teal or #ff66aa">
+        <label for="if-bio">Bio (max 500 chars)</label>
+        <textarea id="if-bio" maxlength="500" placeholder="Loves ice cream and stealing bases.">${v('bio')}</textarea>
+        <button type="submit" class="primary">Save info</button>
+        <a href="#/t/${slugSafe}/player/${playerIdSafe}" class="secondary">Cancel</a>
+        <div id="if-status" class="muted small"></div>
+      </form>
+    </div>`;
+  $('#info-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const payload = {
+      bats:           $('#if-bats').value,
+      throws:         $('#if-throws').value,
+      height:         $('#if-height').value.trim(),
+      age:            $('#if-age').value.trim(),
+      dob:            $('#if-dob').value.trim(),
+      favorite_color: $('#if-color').value.trim(),
+      bio:            $('#if-bio').value.trim(),
+    };
+    const btn = e.target.querySelector('button.primary');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const { error: upErr } = await supabase.from('players').update(payload).eq('id', playerId);
+      if (upErr) throw upErr;
+      toast('Info saved');
+      location.hash = '#/t/' + slugSafe + '/player/' + playerIdSafe;
+    } catch (err) {
+      console.error(err);
+      $('#if-status').textContent = err.message || String(err);
+      $('#if-status').classList.add('error');
+      btn.disabled = false; btn.textContent = 'Save info';
+    }
+  });
 }
 
 /* ================= VIEW: ENTRY FORM (coach add/edit a player-game) ================= */
