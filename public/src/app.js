@@ -284,8 +284,8 @@ async function route() {
 
   // Public team views still work without sign-in
   if (top === 't') return renderTeamRoute(parts.slice(1), session);
-  // Join-team links work signed-in OR signed-out (we route to sign-in and then back)
-  if (top === 'join') return renderJoinTeam(parts[1], session);
+  // Join-team links work signed-in OR signed-out. Optional third segment selects role.
+  if (top === 'join') return renderJoinTeam(parts[1], session, parts[2]);
 
   // Auth-gated routes
   if (!session) { renderSignIn(); return; }
@@ -1839,8 +1839,18 @@ async function renderSettings(team, role) {
 
       <hr class="muted-divider">
 
-      <h3 style="margin:8px 0 4px;font-size:14px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;">Optional: invite as a member</h3>
-      <p class="muted small">For parents who want to be tracked on the team (future features like notifications), share this invite link instead — they'll sign in with their email and be added as a parent.</p>
+      <h3 style="margin:8px 0 4px;font-size:14px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;">Invite a co-coach</h3>
+      <p class="muted small">Use this link for assistant coaches — they'll sign in and gain edit access (can add stats, edit the schedule, etc.). Treat it like a password; anyone with the link can join as a coach.</p>
+      <div class="invite-row">
+        <input id="coach-url" type="text" readonly value="${escapeHtml(window.location.origin + '/#/join/' + team.slug + '/coach')}">
+        <button type="button" id="copy-coach" class="secondary">Copy</button>
+      </div>
+      <div id="coach-status" class="muted small"></div>
+
+      <hr class="muted-divider">
+
+      <h3 style="margin:8px 0 4px;font-size:14px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;">Optional: invite parents as members</h3>
+      <p class="muted small">For parents who want to be tracked on the team (future features like notifications). They sign in and get read-only access.</p>
       <div class="invite-row">
         <input id="invite-url" type="text" readonly value="${escapeHtml(window.location.origin + '/#/join/' + team.slug)}">
         <button type="button" id="copy-invite" class="secondary">Copy</button>
@@ -1933,17 +1943,22 @@ async function renderSettings(team, role) {
     });
   };
   wireCopy('copy-share',  'share-url',  'share-status');
+  wireCopy('copy-coach',  'coach-url',  'coach-status');
   wireCopy('copy-invite', 'invite-url', 'invite-status');
 }
 
 /* ================= VIEW: JOIN TEAM (invite link landing) ================= */
-async function renderJoinTeam(slug, session) {
+async function renderJoinTeam(slug, session, requestedRole) {
   hideTeamNav();
   applyTheme(null);
   if (!slug) {
     $('#app').innerHTML = `<div class="card error">Invalid invite link.</div>`;
     return;
   }
+  // Only 'parent' and 'coach' are valid self-join roles
+  const role = (requestedRole === 'coach') ? 'coach' : 'parent';
+  const roleLabel = role === 'coach' ? 'a coach (can edit stats)' : 'a parent (read-only)';
+
   const team = await loadTeamBySlug(slug);
   if (!team) {
     $('#app').innerHTML = `<div class="card error">Team not found: <code>${escapeHtml(slug)}</code>.</div>`;
@@ -1952,11 +1967,11 @@ async function renderJoinTeam(slug, session) {
   applyTheme(team);
 
   if (!session) {
-    // Show sign-in form, then bring them back to this URL after auth
+    const returnPath = `/#/join/${encodeURIComponent(slug)}${role === 'coach' ? '/coach' : ''}`;
     $('#app').innerHTML = `
       <div class="card">
         <h1>Join ${escapeHtml(team.name)}</h1>
-        <p>Sign in with your email to be added to the team as a parent. You'll get game updates, the schedule, and the roster.</p>
+        <p>You're joining as <strong>${escapeHtml(roleLabel)}</strong>. Sign in with your email — we'll send you a one-click link.</p>
         <form id="signin-form" class="auth-form">
           <label for="email">Email</label>
           <input id="email" type="email" required autocomplete="email" placeholder="you@example.com">
@@ -1973,12 +1988,10 @@ async function renderJoinTeam(slug, session) {
       try {
         const { error } = await supabase.auth.signInWithOtp({
           email,
-          options: {
-            emailRedirectTo: window.location.origin + '/#/join/' + encodeURIComponent(slug),
-          },
+          options: { emailRedirectTo: window.location.origin + returnPath },
         });
         if (error) throw error;
-        status.innerHTML = `Check <strong>${escapeHtml(email)}</strong> for a sign-in link. Once you click it you'll be added to <strong>${escapeHtml(team.name)}</strong> automatically.`;
+        status.innerHTML = `Check <strong>${escapeHtml(email)}</strong> for a sign-in link. Once you click it you'll be added to <strong>${escapeHtml(team.name)}</strong> as ${escapeHtml(roleLabel)}.`;
         btn.style.display = 'none';
       } catch (err) {
         status.textContent = 'Error: ' + (err.message || err);
@@ -1989,9 +2002,8 @@ async function renderJoinTeam(slug, session) {
     return;
   }
 
-  // Signed in — try to add as parent
+  // Signed in — try to add with the requested role
   $('#app').innerHTML = `<div class="card"><h1>Joining ${escapeHtml(team.name)}…</h1></div>`;
-  // Check if already a member
   const { data: existing } = await supabase
     .from('team_members')
     .select('role')
@@ -2003,7 +2015,7 @@ async function renderJoinTeam(slug, session) {
   }
   const { error } = await supabase
     .from('team_members')
-    .insert({ team_id: team.id, user_id: session.user.id, role: 'parent' });
+    .insert({ team_id: team.id, user_id: session.user.id, role });
   if (error) {
     $('#app').innerHTML = `<div class="card error">
       Couldn't add you to the team: ${escapeHtml(error.message || String(error))}
