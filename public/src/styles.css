@@ -246,6 +246,19 @@ button.secondary.small {
 }
 .row-avatar.placeholder { background: var(--row-alt); }
 
+/* Invite-link row in settings */
+.invite-row {
+  display: flex; gap: 6px; align-items: center; margin: 6px 0;
+}
+.invite-row input {
+  flex: 1; min-width: 0;
+  padding: 8px 10px; font-size: 12px;
+  border: 1px solid var(--row-border); border-radius: 6px;
+  background: var(--row-alt);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.invite-row button { flex-shrink: 0; margin: 0; }
+
 /* Result badges (Schedule view) */
 .row-item .badge {
   font-size: 11px; font-weight: 700;

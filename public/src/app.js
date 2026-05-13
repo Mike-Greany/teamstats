@@ -284,6 +284,8 @@ async function route() {
 
   // Public team views still work without sign-in
   if (top === 't') return renderTeamRoute(parts.slice(1), session);
+  // Join-team links work signed-in OR signed-out (we route to sign-in and then back)
+  if (top === 'join') return renderJoinTeam(parts[1], session);
 
   // Auth-gated routes
   if (!session) { renderSignIn(); return; }
@@ -358,7 +360,9 @@ function renderSignIn() {
   $('#app').innerHTML = `
     <div class="card">
       <h1>Welcome to TeamStats</h1>
-      <p>Enter your email — we'll send you a one-click sign-in link. No password to remember.</p>
+      <p>Coaches and parents both sign in the same way. Enter your email and we'll send you a one-click link — no password to remember.</p>
+      <p class="muted small">If you're a <strong>coach</strong>, signing in lets you create or manage your team.<br>
+         If you're a <strong>parent</strong>, your coach should have sent you a "Join team" link — click that link first, then sign in from there.</p>
       <form id="signin-form" class="auth-form">
         <label for="email">Email</label>
         <input id="email" type="email" required autocomplete="email" placeholder="you@example.com">
@@ -1822,6 +1826,16 @@ async function renderSettings(team, role) {
         <a href="#/t/${slugSafe}" class="secondary">Cancel</a>
         <div id="settings-status" class="muted small"></div>
       </form>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-top:0">Invite parents</h2>
+      <p class="muted small">Share this link with parents. When they tap it and sign in with their email, they're automatically added to <strong>${escapeHtml(team.name)}</strong> as a parent (read-only — they can view but not edit stats).</p>
+      <div class="invite-row">
+        <input id="invite-url" type="text" readonly value="${escapeHtml(window.location.origin + '/#/join/' + team.slug)}">
+        <button type="button" id="copy-invite" class="secondary">Copy</button>
+      </div>
+      <div id="invite-status" class="muted small"></div>
     </div>`;
 
   $('#settings-form').addEventListener('submit', async (e) => {
@@ -1893,6 +1907,100 @@ async function renderSettings(team, role) {
   };
   wireLogoUpload('s-logo',   'logo-status',   'team-logo-preview',   'clear-logo',   'team');
   wireLogoUpload('s-league', 'league-status', 'league-logo-preview', 'clear-league', 'league');
+
+  const copyBtn = $('#copy-invite');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', async () => {
+      const url = $('#invite-url').value;
+      try {
+        await navigator.clipboard.writeText(url);
+        $('#invite-status').textContent = 'Link copied to clipboard.';
+      } catch {
+        // Fallback: select the text so the user can copy manually
+        $('#invite-url').select();
+        $('#invite-status').textContent = 'Tap and hold the field, then choose Copy.';
+      }
+    });
+  }
+}
+
+/* ================= VIEW: JOIN TEAM (invite link landing) ================= */
+async function renderJoinTeam(slug, session) {
+  hideTeamNav();
+  applyTheme(null);
+  if (!slug) {
+    $('#app').innerHTML = `<div class="card error">Invalid invite link.</div>`;
+    return;
+  }
+  const team = await loadTeamBySlug(slug);
+  if (!team) {
+    $('#app').innerHTML = `<div class="card error">Team not found: <code>${escapeHtml(slug)}</code>.</div>`;
+    return;
+  }
+  applyTheme(team);
+
+  if (!session) {
+    // Show sign-in form, then bring them back to this URL after auth
+    $('#app').innerHTML = `
+      <div class="card">
+        <h1>Join ${escapeHtml(team.name)}</h1>
+        <p>Sign in with your email to be added to the team as a parent. You'll get game updates, the schedule, and the roster.</p>
+        <form id="signin-form" class="auth-form">
+          <label for="email">Email</label>
+          <input id="email" type="email" required autocomplete="email" placeholder="you@example.com">
+          <button type="submit" class="primary">Send sign-in link</button>
+          <div id="signin-status" class="muted small"></div>
+        </form>
+      </div>`;
+    $('#signin-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const email = $('#email').value.trim();
+      const status = $('#signin-status');
+      const btn = e.target.querySelector('button');
+      btn.disabled = true; btn.textContent = 'Sending…';
+      try {
+        const { error } = await supabase.auth.signInWithOtp({
+          email,
+          options: {
+            emailRedirectTo: window.location.origin + '/#/join/' + encodeURIComponent(slug),
+          },
+        });
+        if (error) throw error;
+        status.innerHTML = `Check <strong>${escapeHtml(email)}</strong> for a sign-in link. Once you click it you'll be added to <strong>${escapeHtml(team.name)}</strong> automatically.`;
+        btn.style.display = 'none';
+      } catch (err) {
+        status.textContent = 'Error: ' + (err.message || err);
+        status.classList.add('error');
+        btn.disabled = false; btn.textContent = 'Send sign-in link';
+      }
+    });
+    return;
+  }
+
+  // Signed in — try to add as parent
+  $('#app').innerHTML = `<div class="card"><h1>Joining ${escapeHtml(team.name)}…</h1></div>`;
+  // Check if already a member
+  const { data: existing } = await supabase
+    .from('team_members')
+    .select('role')
+    .eq('team_id', team.id).eq('user_id', session.user.id).maybeSingle();
+  if (existing) {
+    toast(`You're already on this team (${existing.role}).`);
+    location.hash = '#/t/' + encodeURIComponent(slug);
+    return;
+  }
+  const { error } = await supabase
+    .from('team_members')
+    .insert({ team_id: team.id, user_id: session.user.id, role: 'parent' });
+  if (error) {
+    $('#app').innerHTML = `<div class="card error">
+      Couldn't add you to the team: ${escapeHtml(error.message || String(error))}
+      <p><a href="#/t/${encodeURIComponent(slug)}" class="secondary">View team anyway</a></p>
+    </div>`;
+    return;
+  }
+  toast(`Welcome to ${team.name}!`);
+  location.hash = '#/t/' + encodeURIComponent(slug);
 }
 
 /* ================= VIEW: NOT FOUND ================= */
