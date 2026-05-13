@@ -1137,7 +1137,7 @@ async function renderPlayerForm(team, role, playerId) {
         <input id="pf-last" type="text" maxlength="60" value="${escapeHtml(existing.last_name || '')}">
         <button type="submit" class="primary">${playerId ? 'Save changes' : 'Add player'}</button>
         ${playerId ? '<button type="button" id="delete-player" class="danger">Delete this player</button>' : ''}
-        <a href="#/t/${encodeURIComponent(team.slug)}" class="secondary">Cancel</a>
+        <a href="#/t/${encodeURIComponent(team.slug)}/players" class="secondary">Cancel</a>
         <div id="pf-status" class="muted small"></div>
       </form>
     </div>`;
@@ -1163,7 +1163,7 @@ async function renderPlayerForm(team, role, playerId) {
         if (error) throw error;
       }
       toast(playerId ? 'Player updated' : 'Player added');
-      location.hash = '#/t/' + encodeURIComponent(team.slug);
+      location.hash = '#/t/' + encodeURIComponent(team.slug) + '/players';
     } catch (err) {
       console.error(err);
       status.textContent = err.message || String(err);
@@ -1180,7 +1180,7 @@ async function renderPlayerForm(team, role, playerId) {
         const { error } = await supabase.from('players').delete().eq('id', playerId);
         if (error) throw error;
         toast('Player deleted');
-        location.hash = '#/t/' + encodeURIComponent(team.slug);
+        location.hash = '#/t/' + encodeURIComponent(team.slug) + '/players';
       } catch (err) {
         toast('Delete failed: ' + (err.message || err), true);
       }
@@ -1241,7 +1241,7 @@ async function renderGameForm(team, role, gameId) {
 
         <button type="submit" class="primary">${gameId ? 'Save changes' : 'Add game'}</button>
         ${gameId ? '<button type="button" id="delete-game" class="danger">Delete this game</button>' : ''}
-        <a href="#/t/${encodeURIComponent(team.slug)}" class="secondary">Cancel</a>
+        <a href="#/t/${encodeURIComponent(team.slug)}/schedule" class="secondary">Cancel</a>
         <div id="gf-status" class="muted small"></div>
       </form>
     </div>`;
@@ -1277,7 +1277,7 @@ async function renderGameForm(team, role, gameId) {
         if (error) throw error;
       }
       toast(gameId ? 'Game updated' : 'Game added');
-      location.hash = '#/t/' + encodeURIComponent(team.slug);
+      location.hash = '#/t/' + encodeURIComponent(team.slug) + '/schedule';
     } catch (err) {
       status.textContent = err.message || String(err);
       status.classList.add('error');
@@ -1293,7 +1293,7 @@ async function renderGameForm(team, role, gameId) {
         const { error } = await supabase.from('games').delete().eq('id', gameId);
         if (error) throw error;
         toast('Game deleted');
-        location.hash = '#/t/' + encodeURIComponent(team.slug);
+        location.hash = '#/t/' + encodeURIComponent(team.slug) + '/schedule';
       } catch (err) {
         toast('Delete failed: ' + (err.message || err), true);
       }
@@ -1399,7 +1399,7 @@ Marliey,Marte</pre>
         <button type="button" id="preview-btn" class="secondary">Preview</button>
         <div id="preview-area"></div>
         <button type="submit" class="primary" id="commit-btn" disabled>Import 0 players</button>
-        <a href="#/t/${encodeURIComponent(team.slug)}" class="secondary">Cancel</a>
+        <a href="#/t/${encodeURIComponent(team.slug)}/players" class="secondary">Cancel</a>
         <div id="ri-status" class="muted small"></div>
       </form>
     </div>`;
@@ -1448,7 +1448,7 @@ Marliey,Marte</pre>
       const { error } = await supabase.from('players').insert(rows);
       if (error) throw error;
       toast(`Imported ${rows.length} players`);
-      location.hash = '#/t/' + encodeURIComponent(team.slug);
+      location.hash = '#/t/' + encodeURIComponent(team.slug) + '/players';
     } catch (err) {
       console.error(err);
       status.textContent = err.message || String(err);
@@ -1484,7 +1484,7 @@ async function renderGameImport(team, role) {
         <button type="button" id="preview-btn" class="secondary">Preview</button>
         <div id="preview-area"></div>
         <button type="submit" class="primary" id="commit-btn" disabled>Import 0 games</button>
-        <a href="#/t/${encodeURIComponent(team.slug)}" class="secondary">Cancel</a>
+        <a href="#/t/${encodeURIComponent(team.slug)}/schedule" class="secondary">Cancel</a>
         <div id="gi-status" class="muted small"></div>
       </form>
     </div>`;
@@ -1528,7 +1528,7 @@ async function renderGameImport(team, role) {
       const { error } = await supabase.from('games').insert(rows);
       if (error) throw error;
       toast(`Imported ${rows.length} games`);
-      location.hash = '#/t/' + encodeURIComponent(team.slug);
+      location.hash = '#/t/' + encodeURIComponent(team.slug) + '/schedule';
     } catch (err) {
       status.textContent = err.message || String(err);
       status.classList.add('error');
