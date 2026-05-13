@@ -63,6 +63,7 @@ function applyTheme(team) {
   }
 }
 function setBrand(text) { const b = $('.brand'); if (b) b.textContent = text; }
+function setSubtitle(text) { const s = $('.team-subtitle'); if (s) s.textContent = text || ''; }
 function showTeamNav(team, role, activeTab) {
   const nav = $('#bottomnav');
   nav.hidden = false;
@@ -87,6 +88,33 @@ function hideTeamNav() {
   $('#bottomnav').hidden = true;
   document.body.classList.add('no-nav');
   setBrand('TeamStats');
+  setSubtitle('');
+}
+
+/** Compute "W-L (-T)" and "Next: M/D vs X" from the team's games table. */
+async function loadTopbarSummary(team) {
+  const { data: games } = await supabase
+    .from('games')
+    .select('date, result, opponent, home_away')
+    .eq('team_id', team.id);
+  if (!games) return { record: '', next: '' };
+  let w = 0, l = 0, t = 0;
+  games.forEach(g => {
+    if (g.result === 'W') w++;
+    else if (g.result === 'L') l++;
+    else if (g.result === 'T') t++;
+  });
+  const record = (w || l || t)
+    ? (`${w}-${l}` + (t ? `-${t}` : ''))
+    : '';
+  const today = new Date().toISOString().slice(0, 10);
+  const upcoming = games
+    .filter(g => !g.result && g.date && g.date >= today)
+    .sort((a, b) => a.date.localeCompare(b.date))[0];
+  const next = upcoming
+    ? `Next: ${dateToMD(upcoming.date)} ${upcoming.home_away === 'away' ? '@' : 'vs'} ${upcoming.opponent || ''}`.trim()
+    : '';
+  return { record, next };
 }
 function fmtAvg(x) {
   if (!isFinite(x) || x == null) return '.000';
@@ -284,6 +312,13 @@ async function renderTeamRoute(args, session) {
   }
   applyTheme(team);
   setBrand(team.name);
+  // Run record + next-game in the topbar subtitle (fire and forget, doesn't block view)
+  loadTopbarSummary(team).then(({ record, next }) => {
+    const parts = [];
+    if (record) parts.push(record);
+    if (next)   parts.push(next);
+    setSubtitle(parts.join('  ·  '));
+  });
   const role = session ? await loadMyRole(team.id, session.user.id) : null;
 
   const sub  = args[1];
