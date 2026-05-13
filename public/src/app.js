@@ -1829,8 +1829,18 @@ async function renderSettings(team, role) {
     </div>
 
     <div class="card">
-      <h2 style="margin-top:0">Invite parents</h2>
-      <p class="muted small">Share this link with parents. When they tap it and sign in with their email, they're automatically added to <strong>${escapeHtml(team.name)}</strong> as a parent (read-only — they can view but not edit stats).</p>
+      <h2 style="margin-top:0">Share with parents</h2>
+      <p class="muted small">Parents don't need an account to view the team. Just send them this link:</p>
+      <div class="invite-row">
+        <input id="share-url" type="text" readonly value="${escapeHtml(window.location.origin + '/#/t/' + team.slug)}">
+        <button type="button" id="copy-share" class="secondary">Copy</button>
+      </div>
+      <div id="share-status" class="muted small"></div>
+
+      <hr class="muted-divider">
+
+      <h3 style="margin:8px 0 4px;font-size:14px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;">Optional: invite as a member</h3>
+      <p class="muted small">For parents who want to be tracked on the team (future features like notifications), share this invite link instead — they'll sign in with their email and be added as a parent.</p>
       <div class="invite-row">
         <input id="invite-url" type="text" readonly value="${escapeHtml(window.location.origin + '/#/join/' + team.slug)}">
         <button type="button" id="copy-invite" class="secondary">Copy</button>
@@ -1908,20 +1918,22 @@ async function renderSettings(team, role) {
   wireLogoUpload('s-logo',   'logo-status',   'team-logo-preview',   'clear-logo',   'team');
   wireLogoUpload('s-league', 'league-status', 'league-logo-preview', 'clear-league', 'league');
 
-  const copyBtn = $('#copy-invite');
-  if (copyBtn) {
-    copyBtn.addEventListener('click', async () => {
-      const url = $('#invite-url').value;
+  const wireCopy = (btnId, urlId, statusId) => {
+    const btn = $('#' + btnId);
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      const url = $('#' + urlId).value;
       try {
         await navigator.clipboard.writeText(url);
-        $('#invite-status').textContent = 'Link copied to clipboard.';
+        $('#' + statusId).textContent = 'Link copied to clipboard.';
       } catch {
-        // Fallback: select the text so the user can copy manually
-        $('#invite-url').select();
-        $('#invite-status').textContent = 'Tap and hold the field, then choose Copy.';
+        $('#' + urlId).select();
+        $('#' + statusId).textContent = 'Tap and hold the field, then choose Copy.';
       }
     });
-  }
+  };
+  wireCopy('copy-share',  'share-url',  'share-status');
+  wireCopy('copy-invite', 'invite-url', 'invite-status');
 }
 
 /* ================= VIEW: JOIN TEAM (invite link landing) ================= */
