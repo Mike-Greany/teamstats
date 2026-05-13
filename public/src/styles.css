@@ -235,6 +235,15 @@ button.secondary.small {
 }
 .row-avatar.placeholder { background: var(--row-alt); }
 
+/* Result badges (Schedule view) */
+.row-item .badge {
+  font-size: 11px; font-weight: 700;
+  padding: 3px 8px; border-radius: 12px; color: #fff;
+}
+.row-item .badge.win   { background: var(--good); }
+.row-item .badge.loss  { background: var(--bad); }
+.row-item .badge.tie   { background: #6b7280; }
+
 /* ================= LINEUP BUILDER ================= */
 .lineup-header {
   display: flex; justify-content: space-between; align-items: center;

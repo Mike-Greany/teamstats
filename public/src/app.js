@@ -606,13 +606,21 @@ async function renderColumnSettings(team, role) {
 async function renderTeamSchedule(team, role, session) {
   const writer = isWriter(role);
   const { data: games } = await supabase
-    .from('games').select('id, date, opponent, home_away, location')
+    .from('games').select('id, date, opponent, home_away, location, result, our_score, their_score')
     .eq('team_id', team.id).order('date', { ascending: true });
+  const resultBadge = (g) => {
+    const score = (g.our_score != null && g.their_score != null) ? ` ${g.our_score}-${g.their_score}` : '';
+    if (g.result === 'W') return `<span class="badge win">W${score}</span>`;
+    if (g.result === 'L') return `<span class="badge loss">L${score}</span>`;
+    if (g.result === 'T') return `<span class="badge tie">T${score}</span>`;
+    return '';
+  };
   const rows = (games || []).map(g => `
     <li class="row-item">
       <span class="jersey">${escapeHtml(dateToMD(g.date))}</span>
       <span class="row-main">${escapeHtml(g.opponent || '')}</span>
       <span class="row-meta muted">${g.home_away === 'away' ? '@' : 'vs'}</span>
+      ${resultBadge(g)}
       ${writer ? `<a href="#/t/${encodeURIComponent(team.slug)}/game/${encodeURIComponent(g.id)}" class="edit-btn">✎</a>` : ''}
     </li>`).join('');
   const empty = !games?.length ? `<p class="muted small">No games yet${writer ? ' — tap + Add to add one.' : '.'}</p>` : '';
@@ -1186,10 +1194,10 @@ async function renderGameForm(team, role, gameId) {
     $('#app').innerHTML = `<div class="card error">Only coaches can edit the schedule. <a href="#/t/${encodeURIComponent(team.slug)}">Back</a></div>`;
     return;
   }
-  let existing = { date: '', opponent: '', home_away: 'home', location: '', game_time: '' };
+  let existing = { date: '', opponent: '', home_away: 'home', location: '', game_time: '', result: '', our_score: null, their_score: null };
   if (gameId) {
     const { data, error } = await supabase
-      .from('games').select('id, date, opponent, home_away, location, game_time')
+      .from('games').select('id, date, opponent, home_away, location, game_time, result, our_score, their_score')
       .eq('id', gameId).single();
     if (error || !data) {
       $('#app').innerHTML = `<div class="card error">Game not found. <a href="#/t/${encodeURIComponent(team.slug)}">Back</a></div>`;
@@ -1214,6 +1222,23 @@ async function renderGameForm(team, role, gameId) {
         <input id="gf-loc" type="text" maxlength="120" value="${escapeHtml(existing.location || '')}" placeholder="e.g. Sadie Knox Playground">
         <label for="gf-time">Time (optional)</label>
         <input id="gf-time" type="time" value="${escapeHtml(existing.game_time || '')}">
+
+        <hr class="muted-divider">
+
+        <label for="gf-result">Result (after the game)</label>
+        <select id="gf-result">
+          <option value=""  ${!existing.result ? 'selected' : ''}>— Not played yet</option>
+          <option value="W" ${existing.result === 'W' ? 'selected' : ''}>Win</option>
+          <option value="L" ${existing.result === 'L' ? 'selected' : ''}>Loss</option>
+          <option value="T" ${existing.result === 'T' ? 'selected' : ''}>Tie</option>
+        </select>
+        <div class="row">
+          <div><label for="gf-our">Our score</label>
+            <input id="gf-our" type="number" min="0" inputmode="numeric" value="${existing.our_score == null ? '' : existing.our_score}"></div>
+          <div><label for="gf-their">Their score</label>
+            <input id="gf-their" type="number" min="0" inputmode="numeric" value="${existing.their_score == null ? '' : existing.their_score}"></div>
+        </div>
+
         <button type="submit" class="primary">${gameId ? 'Save changes' : 'Add game'}</button>
         ${gameId ? '<button type="button" id="delete-game" class="danger">Delete this game</button>' : ''}
         <a href="#/t/${encodeURIComponent(team.slug)}" class="secondary">Cancel</a>
@@ -1223,6 +1248,12 @@ async function renderGameForm(team, role, gameId) {
 
   $('#game-form').addEventListener('submit', async (e) => {
     e.preventDefault();
+    const intOrNull = (v) => {
+      const t = String(v ?? '').trim();
+      if (!t) return null;
+      const n = Number(t);
+      return isFinite(n) ? n : null;
+    };
     const payload = {
       team_id: team.id,
       date: $('#gf-date').value,
@@ -1230,6 +1261,9 @@ async function renderGameForm(team, role, gameId) {
       home_away: $('#gf-ha').value,
       location: $('#gf-loc').value.trim() || null,
       game_time: $('#gf-time').value || null,
+      result: $('#gf-result').value || '',
+      our_score:   intOrNull($('#gf-our').value),
+      their_score: intOrNull($('#gf-their').value),
     };
     const status = $('#gf-status');
     const btn = e.target.querySelector('button.primary');
