@@ -349,6 +349,7 @@ async function renderTeamRoute(args, session) {
   if (sub === 'lineup' && !id)            { showTeamNav(team, role, 'lineup');   return renderLineupPicker(team, role); }
   if (sub === 'lineup' && id)             { showTeamNav(team, role, 'lineup');   return renderLineupBuilder(team, role, id); }
   if (sub === 'settings')                 { showTeamNav(team, role, 'team');     return renderSettings(team, role); }
+  if (sub === 'import-sheet')             { showTeamNav(team, role, 'team');     return renderImportFromSheet(team, role); }
 
   renderNotFound();
 }
@@ -577,7 +578,8 @@ async function renderTeamBatting(team, role, session) {
   if (writer) {
     controlsHtml = `
       <a href="#/t/${encodeURIComponent(team.slug)}/settings" class="secondary block">⚙ Team settings (name, colors, logos)</a>
-      <a href="#/t/${encodeURIComponent(team.slug)}/columns" class="secondary block">⚙ Column visibility</a>`;
+      <a href="#/t/${encodeURIComponent(team.slug)}/columns" class="secondary block">⚙ Column visibility</a>
+      <a href="#/t/${encodeURIComponent(team.slug)}/import-sheet" class="secondary block">📥 Import from old Apps Script Sheet (.xlsx)</a>`;
   } else if (hidden.length) {
     const showing = parentShowsAll(team.slug);
     controlsHtml = `<button id="toggle-showall" class="secondary block">${showing ? 'Hide advanced stats' : 'Show advanced stats'}</button>`;
@@ -2025,6 +2027,326 @@ async function renderJoinTeam(slug, session, requestedRole) {
   }
   toast(`Welcome to ${team.name}!`);
   location.hash = '#/t/' + encodeURIComponent(slug);
+}
+
+/* ================= IMPORT FROM APPS SCRIPT SHEET ================= */
+let _sheetjsLoading = null;
+async function loadSheetJS() {
+  if (typeof XLSX !== 'undefined') return;
+  if (_sheetjsLoading) return _sheetjsLoading;
+  _sheetjsLoading = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('Failed to load xlsx parser'));
+    document.head.appendChild(s);
+  });
+  return _sheetjsLoading;
+}
+
+function parseFullName(full) {
+  if (!full) return [null, null];
+  const parts = String(full).trim().split(/\s+/);
+  return [parts[0], parts.slice(1).join(' ')];
+}
+function normalizeDateLoose(v) {
+  // Accept Date object, '5/9', '2026-05-09', '5/9/26'
+  if (v == null || v === '') return null;
+  if (v instanceof Date) {
+    return `${v.getFullYear()}-${String(v.getMonth()+1).padStart(2,'0')}-${String(v.getDate()).padStart(2,'0')}`;
+  }
+  const s = String(v).trim();
+  let m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  m = /^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/.exec(s);
+  if (m) {
+    let yr = m[3] ? Number(m[3]) : new Date().getFullYear();
+    if (yr < 100) yr += 2000;
+    return `${yr}-${String(Number(m[1])).padStart(2,'0')}-${String(Number(m[2])).padStart(2,'0')}`;
+  }
+  return null;
+}
+
+async function renderImportFromSheet(team, role) {
+  if (!isWriter(role)) {
+    $('#app').innerHTML = `<div class="card error">Coaches only.</div>`;
+    return;
+  }
+  const slugSafe = encodeURIComponent(team.slug);
+  $('#app').innerHTML = `
+    <div class="card">
+      <h1>Import from Apps Script Sheet</h1>
+      <p class="muted small">
+        Pull roster, schedule, game-log, profiles, and lineups from your old
+        <code>Teddy's 10U 2026.xlsx</code> file (or whatever your Apps Script Google Sheet
+        is currently exporting). Safe to run multiple times — players and games
+        are matched by name/date; game-log + lineups upsert.
+      </p>
+      <ol class="muted small" style="line-height:1.7;">
+        <li>Export the Google Sheet as <strong>.xlsx</strong>: in the Sheet, <em>File → Download → Microsoft Excel (.xlsx)</em>.</li>
+        <li>Pick that file below.</li>
+      </ol>
+      <form id="import-sheet-form" class="auth-form">
+        <label for="is-file">Excel file</label>
+        <input id="is-file" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
+        <button type="submit" class="primary" disabled id="is-go">Pick a file first</button>
+        <a href="#/t/${slugSafe}/settings" class="secondary">Cancel</a>
+        <div id="is-status" class="muted small"></div>
+        <pre id="is-log" class="muted small" style="white-space:pre-wrap; max-height:300px; overflow:auto; margin-top:6px;"></pre>
+      </form>
+    </div>`;
+
+  const fileEl = $('#is-file');
+  const goBtn  = $('#is-go');
+  const status = $('#is-status');
+  const log    = $('#is-log');
+  let chosenFile = null;
+
+  const append = (line) => { log.textContent += line + '\n'; log.scrollTop = log.scrollHeight; };
+
+  fileEl.addEventListener('change', () => {
+    chosenFile = fileEl.files[0] || null;
+    goBtn.disabled = !chosenFile;
+    goBtn.textContent = chosenFile ? `Import "${chosenFile.name}"` : 'Pick a file first';
+  });
+
+  $('#import-sheet-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!chosenFile) return;
+    goBtn.disabled = true;
+    status.textContent = 'Loading xlsx parser…';
+    log.textContent = '';
+    try {
+      await loadSheetJS();
+      status.textContent = 'Reading file…';
+      const buf = await chosenFile.arrayBuffer();
+      const wb = XLSX.read(buf, { cellDates: true });
+      append('Sheets found: ' + wb.SheetNames.join(', '));
+      await runImport(team, wb, append, (s) => { status.textContent = s; });
+      status.textContent = '✓ Import complete.';
+      goBtn.textContent = 'Done — Import again?';
+      goBtn.disabled = false;
+    } catch (err) {
+      console.error(err);
+      status.textContent = 'Import failed: ' + (err.message || err);
+      status.classList.add('error');
+      goBtn.disabled = false;
+      goBtn.textContent = 'Try again';
+    }
+  });
+}
+
+async function runImport(team, wb, log, setStatus) {
+  // ---------- 1. ROSTER (Players) ----------
+  setStatus('Building roster...');
+  // Roster source: gather unique player full names from Game Log column C
+  const namesFromLog = new Set();
+  if (wb.Sheets['Game Log']) {
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets['Game Log'], { header: 1 });
+    // Apps Script layout: data starts row 4 (index 3). Column C (index 2) = player full name.
+    for (let i = 3; i < rows.length; i++) {
+      const v = rows[i][2];
+      if (v) namesFromLog.add(String(v).trim());
+    }
+  }
+  // Also fold in any names from Player Profiles
+  if (wb.Sheets['Player Profiles']) {
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets['Player Profiles'], { header: 1 });
+    for (let i = 1; i < rows.length; i++) if (rows[i][0]) namesFromLog.add(String(rows[i][0]).trim());
+  }
+  if (namesFromLog.size === 0) {
+    log('No player names found in Game Log or Player Profiles tabs.');
+  }
+
+  // Existing players for this team
+  const { data: existingPlayers } = await supabase
+    .from('players').select('id, first_name, last_name').eq('team_id', team.id);
+  const byName = {};
+  (existingPlayers || []).forEach(p => {
+    const full = `${p.first_name} ${p.last_name || ''}`.trim();
+    byName[full.toLowerCase()] = p.id;
+    byName[String(p.first_name).toLowerCase()] = p.id;     // first-name fallback
+  });
+  const toInsert = [];
+  for (const full of namesFromLog) {
+    const key = full.toLowerCase();
+    if (byName[key]) continue;
+    const [first, last] = parseFullName(full);
+    toInsert.push({ team_id: team.id, first_name: first || full, last_name: last || '' });
+  }
+  if (toInsert.length) {
+    const { data: ins, error } = await supabase.from('players').insert(toInsert).select('id, first_name, last_name');
+    if (error) throw error;
+    ins.forEach(p => {
+      const full = `${p.first_name} ${p.last_name || ''}`.trim();
+      byName[full.toLowerCase()] = p.id;
+      byName[String(p.first_name).toLowerCase()] = p.id;
+    });
+    log(`✓ Inserted ${ins.length} new players`);
+  } else {
+    log('• Roster already populated, skipping insert');
+  }
+
+  // ---------- 2. SCHEDULE (Games) ----------
+  setStatus('Importing schedule...');
+  const gamesFromSheet = [];
+  if (wb.Sheets['Schedule']) {
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets['Schedule'], { header: 1 });
+    // Header at row 1. Cols: Date, Opponent, Home/Away, Result, Our Score, Their Score, Notes
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i]; if (!r[0]) continue;
+      const date = normalizeDateLoose(r[0]);
+      if (!date) continue;
+      gamesFromSheet.push({
+        date,
+        opponent: String(r[1] || ''),
+        home_away: (String(r[2] || 'home').toLowerCase() === 'away') ? 'away' : 'home',
+        result: (['W','L','T'].includes(String(r[3] || ''))) ? String(r[3]) : '',
+        our_score:   r[4] === '' || r[4] == null ? null : Number(r[4]),
+        their_score: r[5] === '' || r[5] == null ? null : Number(r[5]),
+      });
+    }
+  }
+  // Existing games
+  const { data: existingGames } = await supabase
+    .from('games').select('id, date').eq('team_id', team.id);
+  const gameByDate = {};
+  (existingGames || []).forEach(g => { gameByDate[g.date] = g.id; });
+  const newGames = gamesFromSheet
+    .filter(g => !gameByDate[g.date])
+    .map(g => ({ team_id: team.id, ...g }));
+  if (newGames.length) {
+    const { data: ins, error } = await supabase.from('games').insert(newGames).select('id, date');
+    if (error) throw error;
+    ins.forEach(g => { gameByDate[g.date] = g.id; });
+    log(`✓ Inserted ${ins.length} new games`);
+  } else {
+    log('• Schedule already in sync');
+  }
+  // Update results/scores on existing games (game already there but result might be new)
+  let resultsUpdated = 0;
+  for (const g of gamesFromSheet) {
+    const gid = gameByDate[g.date]; if (!gid) continue;
+    if (!g.result && g.our_score == null && g.their_score == null) continue;
+    const { error } = await supabase.from('games').update({
+      result: g.result, our_score: g.our_score, their_score: g.their_score,
+    }).eq('id', gid);
+    if (!error) resultsUpdated++;
+  }
+  if (resultsUpdated) log(`✓ Updated results/score on ${resultsUpdated} games`);
+
+  // ---------- 3. GAME LOG ----------
+  setStatus('Importing game-log entries...');
+  let glCount = 0;
+  if (wb.Sheets['Game Log']) {
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets['Game Log'], { header: 1 });
+    const toUpsert = [];
+    for (let i = 3; i < rows.length; i++) {
+      const r = rows[i];
+      const date = normalizeDateLoose(r[0]);
+      const fullName = r[2] ? String(r[2]).trim() : '';
+      if (!date || !fullName) continue;
+      const pid = byName[fullName.toLowerCase()] || byName[String(fullName).split(' ')[0].toLowerCase()];
+      const gid = gameByDate[date];
+      if (!pid || !gid) { log(`! skip ${fullName} on ${date} (player or game not found)`); continue; }
+      toUpsert.push({
+        team_id: team.id, game_id: gid, player_id: pid,
+        ab: Number(r[3]||0), r: Number(r[4]||0), h: Number(r[5]||0),
+        b1: Number(r[6]||0), b2: Number(r[7]||0),
+        bb: Number(r[8]||0), hbp: Number(r[9]||0),
+        rbi: Number(r[10]||0), sb: Number(r[11]||0),
+        notes: r[12] ? String(r[12]) : null,
+        hr: r.length > 13 && r[13] != null ? Number(r[13]) : 0,
+      });
+    }
+    if (toUpsert.length) {
+      const { error } = await supabase.from('game_log').upsert(toUpsert, { onConflict: 'game_id,player_id' });
+      if (error) throw error;
+      glCount = toUpsert.length;
+      log(`✓ Upserted ${glCount} game-log rows`);
+    } else {
+      log('• No game-log rows to import');
+    }
+  }
+
+  // ---------- 4. PROFILES ----------
+  setStatus('Updating player profiles...');
+  let profCount = 0;
+  if (wb.Sheets['Player Profiles']) {
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets['Player Profiles'], { header: 1 });
+    // Header layout: Player, Jersey, Position, Bats, Throws, Height, Age, DOB, Favorite Color, Bio
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i]; if (!r[0]) continue;
+      const fullName = String(r[0]).trim();
+      const pid = byName[fullName.toLowerCase()] || byName[String(fullName).split(' ')[0].toLowerCase()];
+      if (!pid) continue;
+      const sanitizeHand = (v, allowS = false) => {
+        const u = String(v || '').trim().toUpperCase();
+        if (u === 'L' || u === 'R') return u;
+        if (allowS && u === 'S') return 'S';
+        return '';
+      };
+      const dob = r[7];
+      const dobStr = dob instanceof Date ? `${dob.getMonth()+1}/${dob.getDate()}` : (dob ? String(dob) : null);
+      const payload = {
+        jersey:         r[1] != null ? String(r[1]) : null,
+        position:       r[2] ? String(r[2]) : null,
+        bats:           sanitizeHand(r[3], true),
+        throws:         sanitizeHand(r[4], false),
+        height:         r[5] ? String(r[5]) : null,
+        age:            r[6] != null ? String(r[6]) : null,
+        dob:            dobStr,
+        favorite_color: r[8] ? String(r[8]) : null,
+        bio:            r[9] ? String(r[9]) : null,
+      };
+      const { error } = await supabase.from('players').update(payload).eq('id', pid);
+      if (!error) profCount++;
+    }
+    log(`✓ Updated ${profCount} player profiles`);
+  }
+
+  // ---------- 5. LINEUPS ----------
+  setStatus('Importing lineups...');
+  let lnCount = 0;
+  if (wb.Sheets['Lineups']) {
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets['Lineups'], { header: 1 });
+    const toUpsert = [];
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i]; if (!r[0]) continue;
+      const date = normalizeDateLoose(r[0]);
+      const gid = gameByDate[date]; if (!gid) continue;
+      let orderFull = [], posFull = {};
+      try { orderFull = JSON.parse(r[1] || '[]'); } catch {}
+      try { posFull   = JSON.parse(r[2] || '{}'); } catch {}
+      const orderIds = orderFull
+        .map(n => byName[String(n).toLowerCase()] || byName[String(n).split(' ')[0].toLowerCase()])
+        .filter(Boolean);
+      const posIds = {};
+      Object.keys(posFull).forEach(n => {
+        const pid = byName[n.toLowerCase()] || byName[String(n).split(' ')[0].toLowerCase()];
+        if (pid) posIds[pid] = posFull[n];
+      });
+      toUpsert.push({
+        game_id: gid, team_id: team.id,
+        batting_order: orderIds, positions: posIds,
+        notes: r[3] ? String(r[3]) : null,
+      });
+    }
+    if (toUpsert.length) {
+      const { error } = await supabase.from('lineups').upsert(toUpsert, { onConflict: 'game_id' });
+      if (error) throw error;
+      lnCount = toUpsert.length;
+      log(`✓ Upserted ${lnCount} lineups`);
+    }
+  }
+
+  setStatus('Done.');
+  log('\nMigration complete.');
+  log(`Roster: ${Object.keys(byName).filter(k => k.includes(' ')).length} players`);
+  log(`Games: ${Object.keys(gameByDate).length}`);
+  log(`Game log rows imported: ${glCount}`);
+  log(`Profiles updated: ${profCount}`);
+  log(`Lineups: ${lnCount}`);
 }
 
 /* ================= VIEW: NOT FOUND ================= */
